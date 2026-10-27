@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import {
   ThreadLedger,
   type LedgerStore,
@@ -39,14 +40,20 @@ async function exerciseStoreContract(store: LedgerStore): Promise<void> {
   expect(await store.load('thread-missing')).toBeNull();
 
   const ledger = new ThreadLedger({ participants });
-  ledger.accept(envelope('human-1'));
+  const acc = ledger.accept(envelope('human-1'));
+  if (!acc.accepted) throw new Error('setup failed');
+  ledger.transition(acc.entry.envelope.messageId, 'queued');
   await store.save('thread-1', ledger.snapshot());
 
   const loaded = await store.load('thread-1');
   expect(loaded).not.toBeNull();
+  // The full snapshot (entries, states, counters, indexes) survives the
+  // round trip unchanged.
+  expect(loaded).toEqual(ledger.snapshot());
   const restored = ThreadLedger.restore(loaded!, { participants });
   expect(restored.entries()).toHaveLength(1);
   expect(restored.entries()[0]?.envelope.turnNumber).toBe(1);
+  expect(restored.entries()[0]?.state).toBe('queued');
 
   // Saving again replaces the snapshot for that thread only.
   ledger.accept(envelope('agent-a'));
@@ -104,6 +111,25 @@ describe('LedgerStore contract: sqlite', () => {
       ).toHaveLength(1);
     } finally {
       second.close();
+    }
+  });
+
+  it('surfaces malformed stored JSON as a SyntaxError, never as an empty thread', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-plaza-sqlite-'));
+    dirs.push(dir);
+    const path = join(dir, 'ledger.db');
+    const store = new SqliteLedgerStore(path);
+    const raw = new DatabaseSync(path);
+    raw
+      .prepare('INSERT INTO threads (thread_id, snapshot) VALUES (?, ?)')
+      .run('thread-bad', '{not json');
+    raw.close();
+    try {
+      await expect(store.load('thread-bad')).rejects.toBeInstanceOf(
+        SyntaxError,
+      );
+    } finally {
+      store.close();
     }
   });
 });

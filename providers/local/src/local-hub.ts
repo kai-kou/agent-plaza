@@ -71,7 +71,7 @@ export class LocalHub {
   private constructor(
     opts: LocalHubOptions,
     ledger: ThreadLedger,
-    restoredEntries: number,
+    restoredSeq: number,
   ) {
     this.slack = opts.slack ?? new FakeSlack();
     this.#store = opts.store;
@@ -80,7 +80,7 @@ export class LocalHub {
     this.#tenantId = opts.tenantId ?? 'tenant-synthetic';
     this.#participants = opts.participants;
     this.#ledger = ledger;
-    this.#seq = restoredEntries;
+    this.#seq = restoredSeq;
   }
 
   static async open(opts: LocalHubOptions): Promise<LocalHub> {
@@ -94,7 +94,38 @@ export class LocalHub {
         : ThreadLedger.restore(snapshot, {
             participants: participantsById,
           });
-    return new LocalHub(opts, ledger, ledger.entries().length);
+    const entries = ledger.entries();
+    const first = entries[0];
+    if (first !== undefined) {
+      // The store key selects the thread; a snapshot whose envelopes belong
+      // to a different tenant or channel means the store or the options are
+      // misconfigured, and mixing the two must not pass silently.
+      const e = first.envelope;
+      if (
+        e.tenantId !== (opts.tenantId ?? 'tenant-synthetic') ||
+        e.channelId !== opts.channelId ||
+        e.threadTs !== opts.threadId
+      ) {
+        throw new Error(
+          'local hub: stored thread identity does not match the given options',
+        );
+      }
+    }
+    // The hub's sequence is not part of the ledger snapshot. It is restored
+    // from the largest sequence suffix among accepted message ids, so ids
+    // of accepted posts are never reused even when denied posts consumed
+    // sequence numbers before the reopen (denied posts leave no entry, so
+    // only accepted ids can collide).
+    const prefix = `msg-${opts.threadId}-`;
+    let seq = 0;
+    for (const entry of entries) {
+      const id = entry.envelope.messageId;
+      if (id.startsWith(prefix)) {
+        const n = Number(id.slice(prefix.length));
+        if (Number.isInteger(n) && n > seq) seq = n;
+      }
+    }
+    return new LocalHub(opts, ledger, seq);
   }
 
   registerAgent(agentId: string, handler: AgentHandler): void {
@@ -134,7 +165,7 @@ export class LocalHub {
       senderId: draft.senderId,
       recipientIds: decision.recipients,
       kind: 'discussion',
-      hopCount: 0,
+      hopCount: this.#hopCountFor(draft.senderId),
       turnNumber: null,
       issuedAt: new Date(Date.UTC(2026, 9, 27, 0, n)).toISOString(),
       expiresAt: new Date(Date.UTC(2026, 9, 27, 1, n)).toISOString(),
@@ -151,6 +182,16 @@ export class LocalHub {
     if (!accept.accepted) {
       return { accepted: false, accept };
     }
+    if (accept.duplicate) {
+      // Idempotent replay of an already-delivered post: the original entry
+      // and its Slack message stand; nothing is posted or advanced again.
+      return { accepted: true, entry: accept.entry, decision };
+    }
+    const entry = accept.entry;
+    // Persist the durable acceptance before the body becomes visible in
+    // Slack: the ledger is canonical, so a delivery must never exist
+    // without its accepted record already stored.
+    await this.#persist();
     const delivered = this.slack.postMessage({
       channelId: this.#channelId,
       senderId: draft.senderId,
@@ -159,8 +200,6 @@ export class LocalHub {
     if (delivered.ts !== reservedTs) {
       throw new Error('local hub delivery error: reserved ts mismatch');
     }
-    const entry = accept.entry;
-    await this.#persist();
     await this.#advance(entry.envelope.messageId, 'queued');
     await this.#advance(entry.envelope.messageId, 'delivery_accepted');
 
@@ -173,7 +212,16 @@ export class LocalHub {
       for (const agentId of agentRecipients) {
         const handler = this.#handlers.get(agentId);
         if (handler === undefined) continue;
-        const replyDraft = await handler(entry.envelope);
+        let replyDraft: PostDraft | null;
+        try {
+          replyDraft = await handler(entry.envelope);
+        } catch (err) {
+          // A failed agent run is recorded as such on the delivered entry
+          // (started -> failed) and the error still propagates to the
+          // caller; it is never mistaken for silence or success.
+          await this.#advance(entry.envelope.messageId, 'failed');
+          throw err;
+        }
         if (replyDraft === null) continue;
         const reply = await this.post(replyDraft);
         if (reply.accepted) replied = true;
@@ -191,7 +239,27 @@ export class LocalHub {
     };
   }
 
-  async #advance(messageId: string, to: 'queued' | 'delivery_accepted' | 'started' | 'replied'): Promise<void> {
+  /**
+   * hopCount semantics (envelope spec): agent-to-agent hops since the most
+   * recent human post. A post by a human starts a new run at 0; an agent
+   * post counts the agent entries at the tail of the thread.
+   */
+  #hopCountFor(senderId: string): number {
+    const kindOf = new Map(this.#participants.map((p) => [p.id, p.kind]));
+    if (kindOf.get(senderId) !== 'agent') return 0;
+    const entries = this.#ledger.entries();
+    let hops = 0;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e === undefined || kindOf.get(e.envelope.senderId) !== 'agent') {
+        break;
+      }
+      hops += 1;
+    }
+    return hops;
+  }
+
+  async #advance(messageId: string, to: 'queued' | 'delivery_accepted' | 'started' | 'replied' | 'failed'): Promise<void> {
     const r = this.#ledger.transition(messageId, to);
     if (!r.ok) {
       throw new Error(`local hub state error: ${r.error}`);

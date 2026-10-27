@@ -45,9 +45,11 @@ export class FakeSlack {
 
   /** Resolve a ledger bodyRef (fake-slack://<channelId>/<ts>) to its body. */
   bodyByRef(bodyRef: string): string | null {
-    const match = /^fake-slack:\/\/[^/]+\/(.+)$/.exec(bodyRef);
+    const match = /^fake-slack:\/\/([^/]+)\/(.+)$/.exec(bodyRef);
     if (match === null) return null;
-    const found = this.#messages.find((m) => m.ts === match[1]);
+    const found = this.#messages.find(
+      (m) => m.channelId === match[1] && m.ts === match[2],
+    );
     return found === undefined ? null : found.bodyText;
   }
 }

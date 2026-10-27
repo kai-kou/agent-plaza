@@ -83,6 +83,7 @@ describe('synthetic E2E with persistence: human -> A -> B -> A -> conclusion, th
       'agent-a',
     ]);
     expect(entries.map((e) => e.envelope.turnNumber)).toEqual([1, 2, 3, 4]);
+    expect(entries.map((e) => e.envelope.hopCount)).toEqual([0, 0, 1, 2]);
     expect(entries.map((e) => e.state)).toEqual([
       'replied',
       'replied',
@@ -169,6 +170,9 @@ describe('synthetic E2E with persistence: human -> A -> B -> A -> conclusion, th
       // 1 human + 6 agent messages (pair cap), the 7th agent reply denied.
       expect(entries).toHaveLength(7);
       expect(hub.slack.messages()).toHaveLength(7);
+      expect(
+        hub.slack.messages().map((m) => m.bodyText),
+      ).not.toContain('A の返信 7');
       expect(entries[6]?.state).toBe('started');
     } finally {
       store.close();
