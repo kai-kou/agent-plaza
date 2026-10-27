@@ -97,7 +97,7 @@ describe('verifySlackSignature', () => {
 
   it('rejects malformed signatures and timestamps', async () => {
     const timestamp = String(NOW);
-    for (const signature of ['v0=zz', 'v1=abcd', 'abcd', 'v0=abc']) {
+    for (const signature of ['v0=zz', 'v1=abcd', 'abcd', 'v0=abc', 'v0=abcd', 'v0=', '']) {
       await expect(
         verifySlackSignature({
           signingSecret: SECRET,
@@ -108,13 +108,77 @@ describe('verifySlackSignature', () => {
         }),
       ).resolves.toBe(false);
     }
+    for (const badTs of ['not-a-number', '1793100000.5', '-5', '', ' 1793100000']) {
+      await expect(
+        verifySlackSignature({
+          signingSecret: SECRET,
+          timestamp: badTs,
+          body: BODY,
+          signature: sign(SECRET, timestamp, BODY),
+          nowSeconds: NOW,
+        }),
+      ).resolves.toBe(false);
+    }
+  });
+
+  it('accepts the uppercase-hex form of a valid signature (byte comparison is case-insensitive via decoding)', async () => {
+    const timestamp = String(NOW);
+    const upper = sign(SECRET, timestamp, BODY).toUpperCase().replace('V0=', 'v0=');
     await expect(
       verifySlackSignature({
         signingSecret: SECRET,
-        timestamp: 'not-a-number',
+        timestamp,
         body: BODY,
-        signature: sign(SECRET, timestamp, BODY),
+        signature: upper,
         nowSeconds: NOW,
+      }),
+    ).resolves.toBe(true);
+  });
+
+  it('accepts an empty body when the signature matches, and a future timestamp at the boundary', async () => {
+    const timestamp = String(NOW);
+    await expect(
+      verifySlackSignature({
+        signingSecret: SECRET,
+        timestamp,
+        body: '',
+        signature: sign(SECRET, timestamp, ''),
+        nowSeconds: NOW,
+      }),
+    ).resolves.toBe(true);
+    const futureEdge = String(NOW + 300);
+    await expect(
+      verifySlackSignature({
+        signingSecret: SECRET,
+        timestamp: futureEdge,
+        body: BODY,
+        signature: sign(SECRET, futureEdge, BODY),
+        nowSeconds: NOW,
+      }),
+    ).resolves.toBe(true);
+  });
+
+  it('honors a custom tolerance window', async () => {
+    const inside = String(NOW - 10);
+    const outside = String(NOW - 11);
+    await expect(
+      verifySlackSignature({
+        signingSecret: SECRET,
+        timestamp: inside,
+        body: BODY,
+        signature: sign(SECRET, inside, BODY),
+        nowSeconds: NOW,
+        toleranceSeconds: 10,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      verifySlackSignature({
+        signingSecret: SECRET,
+        timestamp: outside,
+        body: BODY,
+        signature: sign(SECRET, outside, BODY),
+        nowSeconds: NOW,
+        toleranceSeconds: 10,
       }),
     ).resolves.toBe(false);
   });

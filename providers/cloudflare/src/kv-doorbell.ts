@@ -17,6 +17,7 @@ export interface KVNamespaceLike {
 
 export interface DoorbellFlag {
   eventId: string;
+  /** When the doorbell was rung (ISO 8601), not when the event occurred. */
   ts: string;
 }
 
@@ -31,6 +32,13 @@ export class KvDoorbell {
     return `doorbell:${threadId}`;
   }
 
+  /**
+   * Ring for a thread. The flag is a pointer, not a queue: ringing again
+   * replaces it, and peek can only ever return the latest event id. Who
+   * clears the flag after consuming it is the reader's convention, fixed
+   * where the reader is built; leaving it in place is safe because
+   * readers compare the event id against what they already processed.
+   */
   async ring(threadId: string, eventId: string): Promise<void> {
     const flag: DoorbellFlag = {
       eventId,

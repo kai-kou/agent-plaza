@@ -36,9 +36,16 @@ describe('KvDoorbell', () => {
 
   it('treats a malformed stored flag as absent (the doorbell is not a correctness mechanism)', async () => {
     const kv = new FakeKV();
-    kv.data.set('doorbell:thread-1', '{oops');
     const doorbell = new KvDoorbell(kv);
-    expect(await doorbell.peek('thread-1')).toBeNull();
+    for (const bad of [
+      '{oops',
+      '{"foo":1}',
+      '{"eventId":42,"ts":"2026-10-27T00:00:00.000Z"}',
+      '"just a string"',
+    ]) {
+      kv.data.set('doorbell:thread-1', bad);
+      expect(await doorbell.peek('thread-1')).toBeNull();
+    }
   });
 
   it('keeps flags for different threads independent', async () => {

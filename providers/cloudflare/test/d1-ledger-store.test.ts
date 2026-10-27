@@ -16,9 +16,10 @@ import {
  */
 class FakeD1 implements D1DatabaseLike {
   readonly rows = new Map<string, string>();
+  #schemaReady = false;
 
   prepare(query: string): D1PreparedStatementLike {
-    const rows = this.rows;
+    const self = this;
     let bound: unknown[] = [];
     const stmt: D1PreparedStatementLike = {
       bind(...values: unknown[]) {
@@ -27,17 +28,20 @@ class FakeD1 implements D1DatabaseLike {
       },
       async first<T>() {
         if (query.startsWith('SELECT snapshot FROM threads')) {
-          const snapshot = rows.get(bound[0] as string);
+          if (!self.#schemaReady) throw new Error('no such table: threads');
+          const snapshot = self.rows.get(bound[0] as string);
           return (snapshot === undefined ? null : { snapshot }) as T | null;
         }
         throw new Error(`fake D1: unexpected first() for: ${query}`);
       },
       async run() {
         if (query.startsWith('CREATE TABLE IF NOT EXISTS threads')) {
+          self.#schemaReady = true;
           return {};
         }
         if (query.startsWith('INSERT INTO threads')) {
-          rows.set(bound[0] as string, bound[1] as string);
+          if (!self.#schemaReady) throw new Error('no such table: threads');
+          self.rows.set(bound[0] as string, bound[1] as string);
           return {};
         }
         throw new Error(`fake D1: unexpected run() for: ${query}`);
@@ -109,6 +113,15 @@ describe('D1LedgerStore (against a fake D1)', () => {
     const db = new FakeD1();
     db.rows.set('thread-bad', '{not json');
     const store = new D1LedgerStore(db);
+    await store.ensureSchema();
     await expect(store.load('thread-bad')).rejects.toBeInstanceOf(SyntaxError);
+  });
+
+  it('fails loudly when used before ensureSchema, and ensureSchema is idempotent', async () => {
+    const store = new D1LedgerStore(new FakeD1());
+    await expect(store.load('thread-1')).rejects.toThrow('no such table');
+    await store.ensureSchema();
+    await store.ensureSchema();
+    expect(await store.load('thread-1')).toBeNull();
   });
 });

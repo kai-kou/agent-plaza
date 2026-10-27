@@ -27,7 +27,12 @@ export class D1LedgerStore implements LedgerStore {
     this.#db = db;
   }
 
-  /** Create the threads table if it does not exist yet. */
+  /**
+   * Create the threads table if it does not exist yet. The caller (setup
+   * tooling or first-request wiring) must call this once before load/save;
+   * the store deliberately does not create the table implicitly, so a
+   * missing table fails loudly instead of being masked.
+   */
   async ensureSchema(): Promise<void> {
     await this.#db
       .prepare(
