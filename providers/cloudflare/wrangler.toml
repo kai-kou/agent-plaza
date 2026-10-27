@@ -1,0 +1,35 @@
+# agent-plaza hub — Cloudflare Workers configuration.
+# Replace the REPLACE_WITH_* placeholders with the ids printed by the
+# setup commands in README.md. No secrets live in this file; the Slack
+# signing secret is set with `wrangler secret put SLACK_SIGNING_SECRET`.
+name = "agent-plaza-hub"
+main = "src/worker.ts"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "agent-plaza"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[[queues.producers]]
+binding = "QUEUE"
+queue = "agent-plaza-delivery"
+
+[durable_objects]
+bindings = [
+  { name = "THREAD_LEDGER", class_name = "ThreadLedgerObject" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ThreadLedgerObject"]
+
+# Deployment-specific configuration. PARTICIPANTS_JSON is a JSON array of
+# core Participant objects; participant ids are the stable identities
+# (for Slack ingress, "slack:<user id>").
+[vars]
+PARTICIPANTS_JSON = "[]"
