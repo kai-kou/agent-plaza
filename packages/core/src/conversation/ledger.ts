@@ -8,7 +8,10 @@
  * correction-round cap, which needs ledger-side revision information — are
  * enforced at acceptance time, not after the fact.
  *
- * States follow docs/development-policy.md section 2.2:
+ * The canonical definition of the delivery state machine is
+ * spec/ledger-state-machine.json; the conformance tests pin the exported
+ * LEDGER_TRANSITIONS table and the observable transition behavior to that
+ * file. States follow docs/development-policy.md section 2.2:
  * received -> durably_accepted -> queued -> delivery_accepted -> started ->
  * replied -> verified/completed, with blocked / unknown / failed / cancelled.
  * "received" is transient (pre-validation) and is never stored; an entry is
@@ -52,7 +55,7 @@ export type LedgerEntryState =
   | 'failed'
   | 'cancelled';
 
-const TRANSITIONS: Readonly<Record<LedgerEntryState, readonly LedgerEntryState[]>> = {
+export const LEDGER_TRANSITIONS: Readonly<Record<LedgerEntryState, readonly LedgerEntryState[]>> = {
   durably_accepted: ['queued', 'blocked', 'failed', 'cancelled'],
   queued: ['delivery_accepted', 'blocked', 'unknown', 'failed', 'cancelled'],
   delivery_accepted: ['started', 'unknown', 'failed', 'cancelled'],
@@ -142,7 +145,7 @@ export class ThreadLedger {
           `snapshot entry fails envelope validation: ${v.errors.join('; ')}`,
         );
       }
-      if (!Object.hasOwn(TRANSITIONS, entry.state)) {
+      if (!Object.hasOwn(LEDGER_TRANSITIONS, entry.state)) {
         throw new TypeError(`snapshot entry has unknown state: ${String(entry.state)}`);
       }
       if (ledger.#entries.has(entry.envelope.messageId)) {
@@ -294,7 +297,7 @@ export class ThreadLedger {
     if (entry === undefined) {
       return { ok: false, error: `unknown messageId ${messageId}` };
     }
-    if (!TRANSITIONS[entry.state].includes(to)) {
+    if (!LEDGER_TRANSITIONS[entry.state].includes(to)) {
       return {
         ok: false,
         error: `transition ${entry.state} -> ${to} is not allowed`,
