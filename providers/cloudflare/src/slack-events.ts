@@ -9,7 +9,8 @@
  *
  * Processing order per event, mirroring the local hub's lessons:
  * addressing -> ledger acceptance -> persist -> enqueue delivery ->
- * mark queued + persist -> ring the doorbell. A Slack retry (same
+ * mark queued + persist -> ring the doorbell (the thread flag and the
+ * channel's latest-event pointer). A Slack retry (same
  * event_id) resolves through the ledger's idempotency: the original
  * entry is returned, and if its delivery was never enqueued (state still
  * durably_accepted) the enqueue is completed then — the retry heals the
@@ -43,7 +44,10 @@ import {
   type MessageEnvelope,
   type Participant,
 } from '@agent-plaza/core';
-import type { KvDoorbell } from './kv-doorbell.js';
+import {
+  channelLatestThreadId,
+  type KvDoorbell,
+} from './kv-doorbell.js';
 import type { QueueDelivery } from './queue.js';
 import { ThreadSequencer } from './thread-sequencer.js';
 
@@ -365,6 +369,9 @@ async function processMessage(
   }
   await deps.store.save(ctx.threadId, ledger.snapshot());
   await deps.doorbell.ring(ctx.threadId, ctx.eventId);
+  // Move the channel's latest-event pointer too, so Tier-C readers
+  // polling one key per channel also notice brand-new threads.
+  await deps.doorbell.ring(channelLatestThreadId(ctx.channel), ctx.eventId);
 
   return { kind: accept.duplicate ? 'duplicate' : 'accepted', entry: advanced.entry };
 }
