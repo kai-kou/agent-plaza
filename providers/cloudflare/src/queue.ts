@@ -5,6 +5,13 @@
  * whatever wakes and serves the addressed agents. The job carries only
  * identifiers — the consumer reads the content from the ledger and Slack,
  * never from the job — so a redelivered or inspected job exposes nothing.
+ *
+ * Delivery is at-least-once at the job level: when a first attempt dies
+ * after enqueueing but before the queued state is persisted, the Slack
+ * retry enqueues the same message again. Consumers must therefore claim
+ * and deduplicate by {threadId, messageId} against the ledger state;
+ * a second job for an already-served message is a no-op, not a second
+ * delivery.
  */
 
 export interface DeliveryJob {

@@ -45,7 +45,53 @@ export interface EnvBindings {
   SLACK_SIGNING_SECRET: string;
   /** JSON array of core Participant objects for this deployment. */
   PARTICIPANTS_JSON: string;
+  /**
+   * JSON array of Slack channel ids the hub serves (FR-1, D-9).
+   * Optional in the type for local/test wiring; the shipped
+   * wrangler.toml sets it to "[]", which denies every channel until
+   * the operator configures the designated channel.
+   */
+  ALLOWED_CHANNEL_IDS_JSON?: string;
+  /** JSON object mapping Slack bot_id -> participant id, for
+   * bot_message events that carry no user id. */
+  BOT_PARTICIPANTS_JSON?: string;
+  /** This deployment's own Slack bot_id (its echoes are ignored). */
+  OWN_BOT_ID?: string;
   THREAD_LEDGER?: DurableObjectNamespaceLike;
+}
+
+function parseParticipantArray(raw: string): Participant[] {
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error('PARTICIPANTS_JSON must be a JSON array');
+  }
+  return parsed as Participant[];
+}
+
+function parseStringArray(raw: string, name: string): string[] {
+  const parsed: unknown = JSON.parse(raw);
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some((v) => typeof v !== 'string')
+  ) {
+    throw new Error(`${name} must be a JSON array of strings`);
+  }
+  return parsed as string[];
+}
+
+function parseBotParticipants(raw: string): Record<string, string> {
+  const parsed: unknown = JSON.parse(raw);
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    Object.values(parsed).some((v) => typeof v !== 'string')
+  ) {
+    throw new Error(
+      'BOT_PARTICIPANTS_JSON must be a JSON object of string values',
+    );
+  }
+  return parsed as Record<string, string>;
 }
 
 function depsFromEnv(env: EnvBindings): SlackEventsDeps {
@@ -53,7 +99,21 @@ function depsFromEnv(env: EnvBindings): SlackEventsDeps {
     store: new D1LedgerStore(env.DB),
     doorbell: new KvDoorbell(env.KV),
     delivery: new QueueDelivery(env.QUEUE),
-    participants: JSON.parse(env.PARTICIPANTS_JSON) as Participant[],
+    participants: parseParticipantArray(env.PARTICIPANTS_JSON),
+    ...(env.ALLOWED_CHANNEL_IDS_JSON === undefined
+      ? {}
+      : {
+          allowedChannelIds: parseStringArray(
+            env.ALLOWED_CHANNEL_IDS_JSON,
+            'ALLOWED_CHANNEL_IDS_JSON',
+          ),
+        }),
+    ...(env.BOT_PARTICIPANTS_JSON === undefined
+      ? {}
+      : { botParticipants: parseBotParticipants(env.BOT_PARTICIPANTS_JSON) }),
+    ...(env.OWN_BOT_ID === undefined || env.OWN_BOT_ID === ''
+      ? {}
+      : { ownBotId: env.OWN_BOT_ID }),
   };
 }
 
@@ -166,6 +226,15 @@ export function createAppFromEnv(env: EnvBindings): Hono {
  * Object processes one request at a time per instance and the Worker
  * routes by thread id, per-thread processing is serialized globally,
  * not just within an isolate.
+ *
+ * Trust premise: this fetch performs NO signature verification. The
+ * Worker entry verifies the Slack signature before any forwarding, and
+ * the forward does not carry the signature headers, so re-verification
+ * here is impossible by design. This namespace must only ever be
+ * reached through that verified Worker route; it must never be
+ * exposed to unverified requests or bound for another caller, or
+ * forged events could be written straight into the ledger, the
+ * delivery queue and the doorbell.
  */
 export class ThreadLedgerObject {
   readonly #env: EnvBindings;

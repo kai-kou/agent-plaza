@@ -14,6 +14,24 @@
  * entry is returned, and if its delivery was never enqueued (state still
  * durably_accepted) the enqueue is completed then — the retry heals the
  * interrupted first attempt instead of duplicating the message.
+ *
+ * Message subtypes are classified, never blanket-ignored (FR-2/FR-14):
+ * new posts (no subtype, bot_message, file_share, thread broadcasts) are
+ * ingested; edits and deletions (message_changed / message_deleted) are
+ * ignored — they are not propagated to the ledger in this version, the
+ * accepted original stands; the remaining subtypes are system
+ * notifications, not posts. Bot-origin posts are attributed to a
+ * participant (the event's user id, or the bot_id map when the event
+ * carries no user id) and are addressed strictly (FR-14): only an
+ * explicit mention in the message itself counts — thread continuation,
+ * name, role and broadcast never apply to them. The only bot posts
+ * ignored as such are this deployment's own bot echoes (ownBotId):
+ * those deliveries were already recorded at acceptance time.
+ *
+ * Concurrency: callers that process events for one thread concurrently
+ * MUST pass one shared ThreadSequencer in deps (the Worker entry and the
+ * Durable Object both do). Without one, each call falls back to a fresh
+ * sequencer and per-thread serialization does not hold.
  */
 
 import {
@@ -36,6 +54,25 @@ export interface SlackEventsDeps {
   participants: Participant[];
   caps?: LoopCaps;
   sequencer?: ThreadSequencer;
+  /**
+   * Channel allowlist (FR-1, D-9). When set, events from any other
+   * channel are ignored before the ledger is touched; an empty list
+   * therefore denies every channel (fail-closed). Unset means no
+   * channel restriction and is for local/test wiring only — deployed
+   * configuration always sets it.
+   */
+  allowedChannelIds?: string[];
+  /**
+   * Attribution for bot_message events that carry no user id: Slack
+   * bot_id -> participant id.
+   */
+  botParticipants?: Record<string, string>;
+  /**
+   * This deployment's own Slack bot_id. Its posts are echoes of
+   * deliveries already recorded at acceptance time and are the only
+   * bot posts ignored as own posts (FR-14).
+   */
+  ownBotId?: string;
 }
 
 export type SlackEventResult =
@@ -55,11 +92,32 @@ interface SlackEventPayload {
     type?: string;
     subtype?: string;
     user?: string;
+    bot_id?: string;
     channel?: string;
     ts?: string;
     thread_ts?: string;
     text?: string;
   };
+}
+
+/** New-post subtypes: the event is a message entering the channel. */
+const NEW_POST_SUBTYPES: ReadonlySet<string> = new Set([
+  'bot_message',
+  'file_share',
+  'thread_broadcast',
+  'reply_broadcast',
+]);
+
+type MessageClass = 'new_post' | 'edit_or_delete' | 'system';
+
+function classifyMessage(subtype: string | undefined): MessageClass {
+  if (subtype === undefined || NEW_POST_SUBTYPES.has(subtype)) {
+    return 'new_post';
+  }
+  if (subtype === 'message_changed' || subtype === 'message_deleted') {
+    return 'edit_or_delete';
+  }
+  return 'system';
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -100,11 +158,38 @@ export async function handleSlackEvent(
   if (event === undefined || event.type !== 'message') {
     return { kind: 'ignored', reason: 'not a message event' };
   }
-  if (event.subtype !== undefined) {
-    return { kind: 'ignored', reason: `message subtype ${event.subtype}` };
+  const messageClass = classifyMessage(event.subtype);
+  if (messageClass === 'edit_or_delete') {
+    return {
+      kind: 'ignored',
+      reason: `message subtype ${event.subtype ?? '?'}: edits and deletions are not propagated to the ledger`,
+    };
+  }
+  if (messageClass === 'system') {
+    return { kind: 'ignored', reason: `message subtype ${event.subtype ?? '?'}` };
+  }
+  const botOrigin = event.subtype === 'bot_message';
+
+  // The channel allowlist is enforced before anything touches the
+  // ledger (FR-1): an unlisted channel is not a delivery target even
+  // when the app is invited to it.
+  if (
+    deps.allowedChannelIds !== undefined &&
+    event.channel !== undefined &&
+    !deps.allowedChannelIds.includes(event.channel)
+  ) {
+    return { kind: 'ignored', reason: 'channel not in allowlist' };
+  }
+  // Own-bot echoes are the only bot posts ignored as such (FR-14): the
+  // delivery they echo was already recorded at acceptance time.
+  if (
+    botOrigin &&
+    deps.ownBotId !== undefined &&
+    event.bot_id === deps.ownBotId
+  ) {
+    return { kind: 'ignored', reason: 'own bot post' };
   }
   if (
-    event.user === undefined ||
     event.channel === undefined ||
     event.ts === undefined ||
     event.text === undefined ||
@@ -113,8 +198,23 @@ export async function handleSlackEvent(
     return { kind: 'bad_request', reason: 'message event is missing fields' };
   }
 
+  // Attribute the post to a participant: the event's user id, or — for
+  // bot posts that carry none — the deployment's bot_id map. A bot post
+  // attributable to nobody is ignored (it could never be accepted by
+  // the ledger, and bot_id alone is not a discard reason, FR-14).
+  let senderId: string | null = null;
+  if (event.user !== undefined) {
+    senderId = slackParticipantId(event.user);
+  } else if (botOrigin && event.bot_id !== undefined) {
+    senderId = deps.botParticipants?.[event.bot_id] ?? null;
+  }
+  if (senderId === null) {
+    return botOrigin
+      ? { kind: 'ignored', reason: 'bot_message without an attributable sender' }
+      : { kind: 'bad_request', reason: 'message event is missing fields' };
+  }
+
   const channel = event.channel;
-  const user = event.user;
   const ts = event.ts;
   const text = event.text;
   const eventId = payload.event_id;
@@ -126,7 +226,8 @@ export async function handleSlackEvent(
       channel,
       slackThreadTs,
       threadId,
-      user,
+      senderId,
+      botOrigin,
       ts,
       text,
       eventId,
@@ -139,7 +240,10 @@ interface MessageContext {
   channel: string;
   slackThreadTs: string;
   threadId: string;
-  user: string;
+  /** Participant id the post is attributed to. */
+  senderId: string;
+  /** True when the post arrived as a bot_message (FR-14 applies). */
+  botOrigin: boolean;
   ts: string;
   text: string;
   eventId: string;
@@ -165,32 +269,55 @@ async function processMessage(
           ...(deps.caps === undefined ? {} : { caps: deps.caps }),
         });
 
-  const senderId = slackParticipantId(ctx.user);
+  const senderId = ctx.senderId;
   const mentionedIds = [
     ...ctx.text.matchAll(/<@([A-Z0-9]+)>/g),
   ].map((m) => slackParticipantId(m[1]!));
 
   // Thread continuation nominates the author of the thread root, when the
   // root is in the ledger (its bodyRef ends with the root's Slack ts).
+  // Bot-origin posts never get this nomination (FR-14, below).
   let threadNominationId: string | null = null;
-  if (ctx.slackThreadTs !== ctx.ts) {
+  if (!ctx.botOrigin && ctx.slackThreadTs !== ctx.ts) {
     const root = ledger
       .entries()
       .find((e) => e.envelope.bodyRef.endsWith(`/${ctx.slackThreadTs}`));
     threadNominationId = root?.envelope.senderId ?? null;
   }
 
-  const decision = decideAddressing(
-    {
-      mentionedIds,
-      threadNominationId,
-      bodyText: ctx.text,
-      roleMentions: [],
-      broadcast: false,
-      senderId,
-    },
-    deps.participants,
-  );
+  // Addressing inputs this ingress can supply today: Slack mentions and
+  // thread continuation. Role and broadcast addressing are not parsed
+  // here — structured marker parsing (M4) owns them; until then they are
+  // unreachable from ingress rather than guessed from the body.
+  //
+  // FR-14 strict addressing for bot-origin posts: only the mention
+  // level is evaluated, so the input is reduced to mentions alone (an
+  // empty bodyText cannot name-match, no nomination, no role, no
+  // broadcast). Structured in-message addressing, once parsed by the M4
+  // marker work, will feed the same mention level.
+  const decision = ctx.botOrigin
+    ? decideAddressing(
+        {
+          mentionedIds,
+          threadNominationId: null,
+          bodyText: '',
+          roleMentions: [],
+          broadcast: false,
+          senderId,
+        },
+        deps.participants,
+      )
+    : decideAddressing(
+        {
+          mentionedIds,
+          threadNominationId,
+          bodyText: ctx.text,
+          roleMentions: [],
+          broadcast: false,
+          senderId,
+        },
+        deps.participants,
+      );
 
   const eventSeconds = Number(ctx.ts);
   const issued = new Date(

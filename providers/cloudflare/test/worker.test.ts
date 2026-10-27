@@ -156,6 +156,36 @@ describe('worker app (direct route)', () => {
   });
 });
 
+describe('worker app (channel allowlist)', () => {
+  it('ignores messages from channels outside ALLOWED_CHANNEL_IDS_JSON', async () => {
+    const { env, db, jobs } = makeEnv(false);
+    env.ALLOWED_CHANNEL_IDS_JSON = '["C1"]';
+    const app = createAppFromEnv(env);
+
+    const outside = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event_id: 'EvOut',
+      event: {
+        type: 'message',
+        user: 'U100',
+        channel: 'C2',
+        ts: '1793100000.000100',
+        text: '<@U200> hi',
+      },
+    });
+    const resOut = await app.fetch(signedRequest(outside));
+    expect(resOut.status).toBe(200);
+    expect(await resOut.json()).toEqual({ ok: true, kind: 'ignored' });
+    expect(db.rows.size).toBe(0);
+    expect(jobs).toHaveLength(0);
+
+    const resIn = await app.fetch(signedRequest(MESSAGE));
+    expect(resIn.status).toBe(200);
+    expect(await resIn.json()).toEqual({ ok: true, kind: 'accepted' });
+  });
+});
+
 describe('worker app (Durable Object route)', () => {
   it('routes message events to the Durable Object that owns the thread', async () => {
     const { env, db, routedThreads } = makeEnv(true);

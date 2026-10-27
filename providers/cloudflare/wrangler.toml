@@ -31,5 +31,12 @@ new_sqlite_classes = ["ThreadLedgerObject"]
 # Deployment-specific configuration. PARTICIPANTS_JSON is a JSON array of
 # core Participant objects; participant ids are the stable identities
 # (for Slack ingress, "slack:<user id>").
+# ALLOWED_CHANNEL_IDS_JSON is the channel allowlist (FR-1): set it to the
+# designated channel before deploying, e.g. "[\"C0000000000\"]". The "[]"
+# shipped here denies every channel (fail-closed).
+# Optional: BOT_PARTICIPANTS_JSON maps Slack bot_id -> participant id for
+# bot_message events without a user id; OWN_BOT_ID is this deployment's
+# own Slack bot_id, whose delivery echoes are ignored.
 [vars]
 PARTICIPANTS_JSON = "[]"
+ALLOWED_CHANNEL_IDS_JSON = "[]"
