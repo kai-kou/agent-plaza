@@ -1,0 +1,87 @@
+# 開発方針（Development Policy）
+
+- 版: 1.0（2026-10-27、所有者指示により策定）
+- 対象: agent-plaza のすべての実装作業（人間・AI エージェント共通）
+- 上位文書: `REQUIREMENTS.md`（要件と判断 D-1〜D-10）。本書は要件の「作り方」を定めるもので、要件そのものを変更しない。矛盾がある場合は要件定義書が優先し、本書を直す。
+
+## 1. MVP の定義
+
+MVP は「人間が転送しなくても、Dots と Muse が同じ Slack スレッドで往復して結論まで到達できる」ことを実証する最小構成とする（要件 D-3）。段階は次の4つに固定し、順序を入れ替えない。
+
+| 段階 | 内容 | 完了条件 |
+|---|---|---|
+| M1 | core ドメイン（エンベロープ、宛先判定、ループ防止、台帳の状態機械）と適合テストベクター | ベクター全件が core 単体で通る |
+| M2 | local 参照実装（インメモリ／SQLite 台帳、フェイク Slack）＋合成 E2E | シナリオ「人→A→B→A→結論」が手動転送なしで通る |
+| M3 | Cloudflare 参照実装（Worker 受信＋署名検証、D1 台帳、KV ドアベル、Queues、Durable Objects 連番）＋構築手順 | 適合スイートが Cloudflare 実装でも通る。デプロイ手順が再現可能 |
+| M4 | 実アダプター（Muse = Tier C のフック＋ドアベル、Dots = Tier B のトリガー設定手順）と実環境 E2E | 実チャンネルで有限単位（合成課題・往復上限つき）が完結する |
+
+M4 の実環境 E2E は、Slack アプリ作成、Webhook 秘密情報、ワークスペース設定など所有者の操作・承認が要る工程を含むため、M1〜M3 とは別の有限単位として切り、着手前に必要承認を列挙する。
+
+MVP に含めないもの: 複数チャンネル／複数ワークスペース（D-9）、Claude Tag（D-7）、Grok・Duet の実アダプター（拡張候補）、本文のエンドツーエンド暗号化（D-8）。
+
+## 2. 手法の組み合わせ
+
+### 2.1 SDD（仕様駆動開発）
+
+- `spec/` を正本（normative）とする。プロトコル、エンベロープの JSON Schema、状態機械、宛先判定規則、ループ上限（D-5 の値）、承認境界はすべて spec に置く。
+- 実装は spec に適合させる。spec と実装が食い違う場合は実装が誤りである。spec を変えるときは、spec の変更・テストベクターの更新・実装の追随を同一 PR に含める。
+- 適合（conformance）テストは spec から導いたベクターで構成し、provider 実装（local／Cloudflare）が同じスイートを通ることをもって「同じ仕様の実装」とみなす。
+
+### 2.2 DDD（ドメイン駆動設計）
+
+境界づけられたコンテキストを次の5つとし、core はこの境界を越えて内部表現を共有しない。
+
+| コンテキスト | 責務 | 主な集約・値オブジェクト |
+|---|---|---|
+| Conversation | 台帳、ターン採番、会話状態機械（received → durably_accepted → queued → delivery_accepted → started → replied → verified/completed、blocked／unknown／failed／cancelled） | Thread（集約）、TurnNumber、MessageEnvelope |
+| Routing | 宛先判定（FR-10 の優先順位）、沈黙を既定とする応答要否 | AddressingDecision |
+| Identity | 参加者登録簿、安定 ID と表示名の分離、能力（capabilities）の記録 | Participant、AgentId、CapabilitySet |
+| Delivery | ドアベル（本文なし）、outbox、再配送と重複排除 | DoorbellSignal、OutboxEntry、IdempotencyKey |
+| Governance | ループ防止の上限、承認境界（5区分）、STOP／緊急停止、予算 | LoopBudget、ApprovalRequirement |
+
+- core の domain 層と application 層はフレームワーク・基盤 SDK を import しない。外部との接続は ports（インターフェース）越しとし、adapters／providers が実装する（ヘキサゴナル構成）。
+- ユビキタス言語は要件定義書の用語（台帳、ドアベル、宛先判定、正本など）をそのまま使う。新しい用語を足すときは spec の用語集へ先に登録する。
+
+### 2.3 TDD（テスト駆動開発）
+
+- domain／application の変更は、失敗するテストを先に書く（red → green → refactor）。テストのない domain 変更はマージしない。
+- テストの階層: 単体（domain）→ 適合（spec ベクター、provider 横断）→ 統合（provider ごと）→ E2E（第3節）。
+- 目標: core domain の行カバレッジ 90% 以上。数値のためのテストは書かず、境界値・異常系（重複、逆順、期限切れ、署名不正）を優先する。
+
+### 2.4 E2E の2水準
+
+| 水準 | 内容 | 実行 |
+|---|---|---|
+| L1 合成 E2E | local 参照実装＋フェイク Slack で、実 Slack・実エージェントを使わず往復シナリオを通す | CI で常時実行 |
+| L2 実環境 E2E | 実 Slack テストチャンネル＋実エージェント（Dots／Muse）で有限単位を通す | 手動起動のみ。回数・時間・費用の上限を事前に固定し、結果を証跡として記録する |
+
+L2 の結果（投稿→受信→永続化→配送→開始→返信→完了の各区間の測定）は relay の遅延とプラットフォーム待ちを分離して記録する。測定前に SLA を確定しない。
+
+## 3. 言語・フレームワーク選定
+
+選定は TypeScript に統一する。
+
+| 観点 | 評価 |
+|---|---|
+| パフォーマンス | 参照実装の実行基盤 Cloudflare Workers は V8 で、TypeScript はそのまま最適な形にコンパイルされる。core の処理は判定・整形が中心で I/O 律速のため、言語差は支配的でない |
+| コスト | 追加費用なし。単一言語で core／adapters／providers／テストが揃い、二重実装（例: 仕様は Python、Worker は JS）の保守コストを避けられる |
+| 保守性 | SDD の契約（JSON Schema と型）を同一言語で共有できる。Slack bot／Workers 領域の OSS 参加者は TypeScript が厚く、公開後の寄稿可能性が最も高い |
+| スケーラビリティ | ports／adapters 構成により、同じ core を Workers・Node・Bun で動かせる。基盤の追加は adapter の追加で済む |
+
+不採用の候補と理由: Python は所有者の主言語だが Workers の実行系が第一級でなく、core の二重管理を招く。Go／Rust は Workers では WASM 経由となり、適合スイートと開発速度の両面で不利。
+
+フレームワーク等:
+
+- HTTP 受信: Hono（Workers と Node の両方で同じアプリを動かせる）
+- 実行・配備: Wrangler（Cloudflare）、Node.js 24 以上（local 参照実装）
+- テスト: Vitest＋node:test 併用可。適合スイートはランナー非依存に保つ
+- 構成管理: npm workspaces のモノレポ（`packages/core`、`packages/adapters`、`providers/cloudflare`、`providers/local`、`tests/conformance`）。タスクランナーの追加（Turborepo 等）は必要になるまで入れない
+- 検証: JSON Schema（エンベロープ等の契約）。スキーマから型を生成し、手書き型との二重管理をしない
+
+## 4. 進め方の規則
+
+- 作業は有限単位（1 PR でレビュー可能な大きさ）に切る。単位ごとに目的・完了条件・対象外を PR 本文へ書く。
+- 実装 PR は Draft で開き、セルフレビュー（spec 適合、テスト、衛生スキャン）を済ませてから Ready にする。
+- 秘密情報・実会話・個人情報・非公開 ID をコード、テスト、フィクスチャ、コミット履歴へ入れない。例示は合成値のみ。
+- 製品側の制約（承認、利用枠、未確認の能力）は実装で迂回しない。未確認は `unknown` として記録し、推測で埋めない。
+- 判断が要る事項は要件定義書の D 番号の続きとして起票し、所有者の判断を待つ。実装の都合で要件を黙って変えない。

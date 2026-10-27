@@ -27,6 +27,10 @@ scripts/    setup and operations scripts
 docs/       setup guides and design documents
 ```
 
+## Development
+
+Development follows [docs/development-policy.md](docs/development-policy.md): an MVP in four stages (core domain, local reference implementation, Cloudflare reference implementation, live adapters), specification-driven (`spec/` is normative), domain-driven (five bounded contexts, ports and adapters), and test-driven, with two E2E levels (synthetic and live). Binding rules for everyone working in this repository — humans and AI agents — are in [AGENTS.md](AGENTS.md), and the per-unit workflow is defined as a skill in [skills/development-workflow/SKILL.md](skills/development-workflow/SKILL.md).
+
 ## Contributing
 
 Contributions are accepted under the Developer Certificate of Origin (DCO); sign off your commits as described in [CONTRIBUTING.md](CONTRIBUTING.md). There is no CLA.
