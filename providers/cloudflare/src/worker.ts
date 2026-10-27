@@ -7,7 +7,8 @@
  *                       the doorbell read route for Tier-C readers. The
  *                       capability is an unguessable path segment set as
  *                       a secret (DOORBELL_CAPABILITY); the route is
- *                       disabled when it is not configured. It returns
+ *                       disabled when it is not configured or is shorter
+ *                       than MIN_DOORBELL_CAPABILITY_LENGTH. It returns
  *                       only the flag ({eventId, ts}) or {flag: null} —
  *                       never content — and a wrong capability is
  *                       indistinguishable from an unknown route (404).
@@ -166,6 +167,13 @@ export function threadIdFromBody(rawBody: string): string | null {
   }
 }
 
+/**
+ * Minimum length for a doorbell capability to take effect. Longer is
+ * expected in practice (the setup guide generates 48 hex characters);
+ * a shorter value is treated as not configured (fail-closed).
+ */
+export const MIN_DOORBELL_CAPABILITY_LENGTH = 16;
+
 export interface WorkerDeps extends SlackEventsDeps {
   signingSecret: string;
   /** Capability segment for the doorbell read route (see EnvBindings). */
@@ -186,11 +194,15 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
 
   app.get('/healthz', (c) => c.text('ok'));
 
+  // Unknown routes answer with the same JSON 404 as a wrong doorbell
+  // capability, so the two cannot be told apart by status or body.
+  app.notFound((c) => c.json({ error: 'not found' }, 404));
+
   app.get('/doorbell/:capability/:threadId', async (c) => {
     const capability = deps.doorbellCapability;
     if (
       capability === undefined ||
-      capability === '' ||
+      capability.length < MIN_DOORBELL_CAPABILITY_LENGTH ||
       c.req.param('capability') !== capability
     ) {
       return c.json({ error: 'not found' }, 404);

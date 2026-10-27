@@ -228,6 +228,30 @@ describe('worker app (doorbell read route)', () => {
     const res = await app.request(doorbellUrl(CAP, THREAD));
     expect(res.status).toBe(404);
   });
+
+  it('treats a too-short capability as not configured', async () => {
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = 'short';
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+    const res = await app.request(doorbellUrl('short', THREAD));
+    expect(res.status).toBe(404);
+  });
+
+  it('answers unknown routes with the same 404 body as a wrong capability', async () => {
+    const { env } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    const app = createAppFromEnv(env);
+    const unknown = await app.request('http://hub.test/no-such-route');
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toEqual({ error: 'not found' });
+    const wrong = await app.request(doorbellUrl('nope', THREAD));
+    expect(wrong.status).toBe(404);
+    expect(await wrong.json()).toEqual({ error: 'not found' });
+  });
 });
 
 describe('worker app (Durable Object route)', () => {
