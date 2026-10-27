@@ -3,6 +3,15 @@
  *
  * Routes:
  * - GET  /healthz       liveness, no dependencies touched.
+ * - GET  /doorbell/:capability/:threadId
+ *                       the doorbell read route for Tier-C readers. The
+ *                       capability is an unguessable path segment set as
+ *                       a secret (DOORBELL_CAPABILITY); the route is
+ *                       disabled when it is not configured or is shorter
+ *                       than MIN_DOORBELL_CAPABILITY_LENGTH. It returns
+ *                       only the flag ({eventId, ts}) or {flag: null} —
+ *                       never content — and a wrong capability is
+ *                       indistinguishable from an unknown route (404).
  * - POST /slack/events  Slack Events API ingress. The signature is
  *   verified first; url_verification challenges are answered inline.
  *   Message events are processed by the ingress core (slack-events.ts),
@@ -57,6 +66,12 @@ export interface EnvBindings {
   BOT_PARTICIPANTS_JSON?: string;
   /** This deployment's own Slack bot_id (its echoes are ignored). */
   OWN_BOT_ID?: string;
+  /**
+   * Unguessable capability segment for the doorbell read route. Set it
+   * with `wrangler secret put DOORBELL_CAPABILITY`; the route is
+   * disabled when it is unset or empty.
+   */
+  DOORBELL_CAPABILITY?: string;
   THREAD_LEDGER?: DurableObjectNamespaceLike;
 }
 
@@ -152,8 +167,17 @@ export function threadIdFromBody(rawBody: string): string | null {
   }
 }
 
+/**
+ * Minimum length for a doorbell capability to take effect. Longer is
+ * expected in practice (the setup guide generates 48 hex characters);
+ * a shorter value is treated as not configured (fail-closed).
+ */
+export const MIN_DOORBELL_CAPABILITY_LENGTH = 16;
+
 export interface WorkerDeps extends SlackEventsDeps {
   signingSecret: string;
+  /** Capability segment for the doorbell read route (see EnvBindings). */
+  doorbellCapability?: string;
   nowSeconds?: () => number;
   /** Optional per-thread forwarder (the Durable Object route). */
   forwardToThread?: (
@@ -169,6 +193,23 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
     deps.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
 
   app.get('/healthz', (c) => c.text('ok'));
+
+  // Unknown routes answer with the same JSON 404 as a wrong doorbell
+  // capability, so the two cannot be told apart by status or body.
+  app.notFound((c) => c.json({ error: 'not found' }, 404));
+
+  app.get('/doorbell/:capability/:threadId', async (c) => {
+    const capability = deps.doorbellCapability;
+    if (
+      capability === undefined ||
+      capability.length < MIN_DOORBELL_CAPABILITY_LENGTH ||
+      c.req.param('capability') !== capability
+    ) {
+      return c.json({ error: 'not found' }, 404);
+    }
+    const flag = await deps.doorbell.peek(c.req.param('threadId'));
+    return flag === null ? c.json({ flag: null }) : c.json(flag);
+  });
 
   app.post('/slack/events', async (c) => {
     const body = await c.req.text();
@@ -216,6 +257,10 @@ export function createAppFromEnv(env: EnvBindings): Hono {
   return createWorkerApp({
     ...base,
     signingSecret: env.SLACK_SIGNING_SECRET,
+    ...(env.DOORBELL_CAPABILITY === undefined ||
+    env.DOORBELL_CAPABILITY === ''
+      ? {}
+      : { doorbellCapability: env.DOORBELL_CAPABILITY }),
     ...(forwardToThread === undefined ? {} : { forwardToThread }),
   });
 }

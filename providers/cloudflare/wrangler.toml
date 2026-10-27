@@ -1,7 +1,9 @@
 # agent-plaza hub — Cloudflare Workers configuration.
 # Replace the REPLACE_WITH_* placeholders with the ids printed by the
 # setup commands in README.md. No secrets live in this file; the Slack
-# signing secret is set with `wrangler secret put SLACK_SIGNING_SECRET`.
+# signing secret is set with `wrangler secret put SLACK_SIGNING_SECRET`
+# and the doorbell read capability with
+# `wrangler secret put DOORBELL_CAPABILITY`.
 name = "agent-plaza-hub"
 main = "src/worker.ts"
 compatibility_date = "2026-10-01"

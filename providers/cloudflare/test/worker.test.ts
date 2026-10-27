@@ -186,6 +186,74 @@ describe('worker app (channel allowlist)', () => {
   });
 });
 
+describe('worker app (doorbell read route)', () => {
+  const THREAD = 'C1:1793100000.000100';
+  const CAP = 'test-capability-0123456789abcdef';
+
+  function doorbellUrl(cap: string, thread: string): string {
+    return `http://hub.test/doorbell/${cap}/${encodeURIComponent(thread)}`;
+  }
+
+  it('serves the flag only through the capability path', async () => {
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+
+    const ok = await app.request(doorbellUrl(CAP, THREAD));
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({
+      eventId: 'Ev1',
+      ts: '2026-10-27T00:00:00.000Z',
+    });
+
+    const wrong = await app.request(doorbellUrl('nope', THREAD));
+    expect(wrong.status).toBe(404);
+
+    const absent = await app.request(doorbellUrl(CAP, 'C1:9999999999.999999'));
+    expect(absent.status).toBe(200);
+    expect(await absent.json()).toEqual({ flag: null });
+  });
+
+  it('is disabled when no capability is configured', async () => {
+    const { env, kv } = makeEnv(false);
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+    const res = await app.request(doorbellUrl(CAP, THREAD));
+    expect(res.status).toBe(404);
+  });
+
+  it('treats a too-short capability as not configured', async () => {
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = 'short';
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+    const res = await app.request(doorbellUrl('short', THREAD));
+    expect(res.status).toBe(404);
+  });
+
+  it('answers unknown routes with the same 404 body as a wrong capability', async () => {
+    const { env } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    const app = createAppFromEnv(env);
+    const unknown = await app.request('http://hub.test/no-such-route');
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toEqual({ error: 'not found' });
+    const wrong = await app.request(doorbellUrl('nope', THREAD));
+    expect(wrong.status).toBe(404);
+    expect(await wrong.json()).toEqual({ error: 'not found' });
+  });
+});
+
 describe('worker app (Durable Object route)', () => {
   it('routes message events to the Durable Object that owns the thread', async () => {
     const { env, db, routedThreads } = makeEnv(true);

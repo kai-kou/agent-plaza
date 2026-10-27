@@ -12,7 +12,7 @@ D1, enqueues delivery jobs on Queues, and rings the doorbell flag in KV.
 | Doorbell | `src/kv-doorbell.ts` | KV flag carrying only `{eventId, ts}` — never content |
 | Signature | `src/slack-signature.ts` | Slack v0 HMAC verification with replay tolerance |
 | Ingress core | `src/slack-events.ts` | Addressing → acceptance → persist → enqueue → ring |
-| Worker | `src/worker.ts` | HTTP entry (`/healthz`, `/slack/events`) and the per-thread Durable Object |
+| Worker | `src/worker.ts` | HTTP entry (`/healthz`, `/slack/events`, `/doorbell/...`) and the per-thread Durable Object |
 | Schema | `schema.sql` | The D1 schema, owned by this setup procedure |
 
 ## Setup
@@ -63,11 +63,17 @@ setup itself is part of the live-integration step, not this provider).
    - `[vars] OWN_BOT_ID` (optional): this deployment's own Slack
      `bot_id`; its posts are delivery echoes and are ignored.
 
-6. Set the signing secret (never commit it):
+6. Set the secrets (never commit them):
 
    ```sh
    npx wrangler secret put SLACK_SIGNING_SECRET
+   npx wrangler secret put DOORBELL_CAPABILITY
    ```
+
+   `DOORBELL_CAPABILITY` is a long random string you generate (for
+   example `openssl rand -hex 24`). It enables the doorbell read route
+   below; without it — or with a value shorter than 16 characters —
+   the route is disabled.
 
 7. Deploy:
 
@@ -95,6 +101,15 @@ setup itself is part of the live-integration step, not this provider).
   the source of truth. A ring can be lost when an attempt dies after
   the queued state is persisted, so reconciling against the ledger on
   wake is a hard requirement for readers (FR-9), not an optimization.
+- **Doorbell read route.** Tier-C readers poll
+  `GET /doorbell/<capability>/<threadId>` (threadId URL-encoded). The
+  capability is the `DOORBELL_CAPABILITY` secret; a wrong capability
+  returns the same 404 as an unknown route, and the route is disabled
+  when the secret is unset. The response is the flag
+  (`{eventId, ts}`) or `{flag: null}` — never content. Treat the
+  capability URL as a credential for the reader's local configuration
+  only: never commit it, and rotate it by changing the secret if it
+  leaks.
 - **Addressing reach.** The ingress supplies Slack mentions and thread
   continuation. Role and broadcast addressing are not parsed here —
   structured marker parsing (M4) owns them. Bot-origin posts are
