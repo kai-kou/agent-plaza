@@ -62,6 +62,13 @@ describe('message envelope validation', () => {
     if (!r.ok) expect(r.errors.join(' ')).toContain('hopCount');
   });
 
+  it('rejects an envelope with an unknown field (schema additionalProperties: false)', () => {
+    const candidate = { ...valid(), unexpectedField: 'x' };
+    const r = validateEnvelope(candidate);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.join(' ')).toContain('unexpectedField');
+  });
+
   it('rejects an unknown message kind', () => {
     const r = validateEnvelope(
       valid({ kind: 'telepathy' as MessageEnvelope['kind'] }),

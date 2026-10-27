@@ -4,8 +4,9 @@
  * Caps are the values decided in D-5 (REQUIREMENTS.md). They are configuration,
  * not constants of nature: callers pass caps explicitly, and DEFAULT_LOOP_CAPS
  * is the decided starting set. Human posts reset the underlying activity
- * counters (hop count and exchanges); that reset is applied by the caller when
- * it folds a human message into the activity, not inside this guard.
+ * counters (hop count and exchanges): this module provides the cleared
+ * activity via resetForHumanPost, and the caller applies it when it folds a
+ * human message into the ledger.
  */
 
 export interface LoopCaps {

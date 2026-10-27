@@ -38,6 +38,23 @@ export type ValidationResult =
 
 const KINDS: readonly string[] = ['discussion', 'announcement', 'emergency', 'control'];
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+/** The 14 fields of spec/envelope.schema.json; the schema sets additionalProperties: false. */
+const KNOWN_FIELDS: ReadonlySet<string> = new Set([
+  'messageId',
+  'idempotencyKey',
+  'tenantId',
+  'channelId',
+  'threadTs',
+  'senderId',
+  'recipientIds',
+  'kind',
+  'hopCount',
+  'turnNumber',
+  'issuedAt',
+  'expiresAt',
+  'bodyRef',
+  'bodySha256',
+]);
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === 'string' && v.length > 0;
@@ -50,6 +67,11 @@ export function validateEnvelope(candidate: unknown): ValidationResult {
   }
   const e = candidate as Record<string, unknown>;
 
+  for (const key of Object.keys(e)) {
+    if (!KNOWN_FIELDS.has(key)) {
+      errors.push(`unknown field: ${key}`);
+    }
+  }
   for (const field of ['messageId', 'idempotencyKey', 'tenantId', 'channelId', 'senderId', 'bodyRef'] as const) {
     if (!isNonEmptyString(e[field])) {
       errors.push(`${field} must be a non-empty string`);
