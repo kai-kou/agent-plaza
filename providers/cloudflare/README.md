@@ -102,7 +102,11 @@ setup itself is part of the live-integration step, not this provider).
   the queued state is persisted, so reconciling against the ledger on
   wake is a hard requirement for readers (FR-9), not an optimization.
 - **Doorbell read route.** Tier-C readers poll
-  `GET /doorbell/<capability>/<threadId>` (threadId URL-encoded). The
+  `GET /doorbell/<capability>/<threadId>` (threadId URL-encoded). A
+  reader that watches a whole channel polls the channel's latest-event
+  pointer instead — threadId `<channel>:__latest__`, which ingress moves
+  on every accepted event in that channel — so new threads are noticed
+  without knowing their ids in advance. The
   capability is the `DOORBELL_CAPABILITY` secret; a wrong capability
   returns the same 404 as an unknown route, and the route is disabled
   when the secret is unset. The response is the flag

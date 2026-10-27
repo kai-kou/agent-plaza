@@ -21,6 +21,21 @@ export interface DoorbellFlag {
   ts: string;
 }
 
+/**
+ * The synthetic thread id whose flag is a channel's latest-event pointer:
+ * `doorbell:<channel>:__latest__` names the latest event id rung for the
+ * channel. Ingress moves this pointer whenever
+ * it rings a thread flag, so a Tier-C reader can poll one key per
+ * channel and still notice a brand-new thread — whose real thread id it
+ * cannot know in advance — then reconcile against the ledger as usual.
+ * The flag carries the same `{eventId, ts}` payload as any other: a
+ * pointer, never content. The suffix cannot collide with a real thread
+ * id, whose tail is always a Slack timestamp.
+ */
+export function channelLatestThreadId(channel: string): string {
+  return `${channel}:__latest__`;
+}
+
 export class KvDoorbell {
   readonly #kv: KVNamespaceLike;
 

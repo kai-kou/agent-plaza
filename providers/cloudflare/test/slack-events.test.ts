@@ -144,6 +144,46 @@ describe('handleSlackEvent', () => {
     expect(flag?.eventId).toBe('Ev1');
   });
 
+  it('also moves the channel-latest doorbell pointer on accept', async () => {
+    const { deps } = makeDeps();
+    const r1 = await handleSlackEvent(
+      deps,
+      messageBody({ eventId: 'Ev1', user: 'U100', text: '<@U200> 一つ目' }),
+    );
+    expect(r1.kind).toBe('accepted');
+    expect((await deps.doorbell.peek('C1:__latest__'))?.eventId).toBe('Ev1');
+
+    // A second accepted message in another thread moves the pointer,
+    // while the per-thread flags stay where they were.
+    const r2 = await handleSlackEvent(
+      deps,
+      messageBody({
+        eventId: 'Ev2',
+        user: 'U100',
+        text: '<@U200> 二つ目',
+        ts: '1793100001.000200',
+      }),
+    );
+    expect(r2.kind).toBe('accepted');
+    expect((await deps.doorbell.peek('C1:__latest__'))?.eventId).toBe('Ev2');
+    expect((await deps.doorbell.peek('C1:1793100000.000100'))?.eventId).toBe(
+      'Ev1',
+    );
+    expect((await deps.doorbell.peek('C1:1793100001.000200'))?.eventId).toBe(
+      'Ev2',
+    );
+  });
+
+  it('does not move the channel-latest pointer when nothing is accepted', async () => {
+    const { deps } = makeDeps();
+    const r = await handleSlackEvent(
+      deps,
+      messageBody({ eventId: 'EvX', user: 'U999', text: '<@U200> 誰' }),
+    );
+    expect(r.kind).not.toBe('accepted');
+    expect(await deps.doorbell.peek('C1:__latest__')).toBeNull();
+  });
+
   it('treats a Slack retry as a duplicate: one entry, one job', async () => {
     const { deps, store, jobs } = makeDeps();
     const body = messageBody({ eventId: 'Ev1', user: 'U100', text: 'hello' });

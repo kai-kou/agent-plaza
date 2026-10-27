@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { KvDoorbell, type KVNamespaceLike } from '@agent-plaza/cloudflare';
+import {
+  KvDoorbell,
+  channelLatestThreadId,
+  type KVNamespaceLike,
+} from '@agent-plaza/cloudflare';
 
 class FakeKV implements KVNamespaceLike {
   readonly data = new Map<string, string>();
@@ -53,5 +57,14 @@ describe('KvDoorbell', () => {
     await doorbell.ring('thread-1', 'evt-1');
     expect(await doorbell.peek('thread-2')).toBeNull();
     expect((await doorbell.peek('thread-1'))?.eventId).toBe('evt-1');
+  });
+
+  it('derives the channel-latest pointer id, distinct from any real thread id', async () => {
+    expect(channelLatestThreadId('C1')).toBe('C1:__latest__');
+    const doorbell = new KvDoorbell(new FakeKV());
+    await doorbell.ring(channelLatestThreadId('C1'), 'evt-9');
+    expect((await doorbell.peek('C1:__latest__'))?.eventId).toBe('evt-9');
+    // A real thread flag is independent of the channel pointer.
+    expect(await doorbell.peek('C1:1793100000.000100')).toBeNull();
   });
 });
