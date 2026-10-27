@@ -9,7 +9,7 @@ import {
   type MessageEnvelope,
   type Participant,
   type ThreadActivity,
-} from '../../packages/core/src/index.js';
+} from '@agent-plaza/core';
 
 /**
  * Synthetic E2E (level L1): a fake hub wiring the core domain together with

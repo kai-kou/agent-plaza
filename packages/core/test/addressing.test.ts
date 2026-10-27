@@ -3,7 +3,7 @@ import {
   decideAddressing,
   type AddressingInput,
   type Participant,
-} from '../src/routing/addressing.js';
+} from '@agent-plaza/core';
 
 const participants: Participant[] = [
   { id: 'human-1', displayName: 'Owner', aliases: [], roles: [], kind: 'human' },
