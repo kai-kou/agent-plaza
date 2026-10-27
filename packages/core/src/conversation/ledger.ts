@@ -12,7 +12,17 @@
  * received -> durably_accepted -> queued -> delivery_accepted -> started ->
  * replied -> verified/completed, with blocked / unknown / failed / cancelled.
  * "received" is transient (pre-validation) and is never stored; an entry is
- * created at durably_accepted.
+ * created at durably_accepted. blocked and unknown are terminal here by
+ * design: a blocked or unresolved delivery is superseded by new messages,
+ * never revived by a state transition.
+ *
+ * One ledger instance serves exactly one thread; matching an envelope's
+ * tenantId / channelId / threadTs to that thread is the caller's routing
+ * responsibility. Idempotent retries resend the pre-acceptance candidate
+ * (turnNumber null); a retry that replays an already-numbered envelope is
+ * rejected, not resolved to the original entry. Correction rounds are
+ * counted per directly corrected message: a correction of a correction
+ * counts toward its own target, not toward the root of the chain.
  */
 
 import {
@@ -113,19 +123,49 @@ export class ThreadLedger {
       s === null ||
       s.version !== 1 ||
       !Array.isArray(s.entries) ||
-      typeof s.nextTurn !== 'number'
+      typeof s.nextTurn !== 'number' ||
+      typeof s.activity !== 'object' ||
+      s.activity === null ||
+      typeof s.correctionRounds !== 'object' ||
+      s.correctionRounds === null ||
+      typeof s.idempotencyIndex !== 'object' ||
+      s.idempotencyIndex === null
     ) {
       throw new TypeError('invalid thread ledger snapshot');
     }
     const ledger = new ThreadLedger(config);
-    ledger.#nextTurn = s.nextTurn;
+    let maxTurn = 0;
     for (const entry of s.entries) {
-      ledger.#entries.set(entry.envelope.messageId, {
-        envelope: { ...entry.envelope },
-        state: entry.state,
-        correctsMessageId: entry.correctsMessageId,
-      });
+      const v = validateEnvelope(entry.envelope);
+      if (!v.ok) {
+        throw new TypeError(
+          `snapshot entry fails envelope validation: ${v.errors.join('; ')}`,
+        );
+      }
+      if (!(entry.state in TRANSITIONS)) {
+        throw new TypeError(`snapshot entry has unknown state: ${String(entry.state)}`);
+      }
+      if (ledger.#entries.has(entry.envelope.messageId)) {
+        throw new TypeError(
+          `snapshot contains duplicate messageId ${entry.envelope.messageId}`,
+        );
+      }
+      const turn = entry.envelope.turnNumber;
+      if (turn === null || turn < 1) {
+        throw new TypeError('snapshot entry has no assigned turnNumber');
+      }
+      maxTurn = Math.max(maxTurn, turn);
+      ledger.#entries.set(entry.envelope.messageId, copyEntry(entry));
     }
+    if (s.nextTurn <= maxTurn) {
+      throw new TypeError('snapshot nextTurn would reuse an assigned turn number');
+    }
+    for (const messageId of Object.values(s.idempotencyIndex)) {
+      if (!ledger.#entries.has(messageId)) {
+        throw new TypeError('snapshot idempotencyIndex points at a missing entry');
+      }
+    }
+    ledger.#nextTurn = s.nextTurn;
     ledger.#activity = {
       ...s.activity,
       perAgentCounts: { ...s.activity.perAgentCounts },
@@ -141,11 +181,7 @@ export class ThreadLedger {
     return {
       version: 1,
       nextTurn: this.#nextTurn,
-      entries: [...this.#entries.values()].map((e) => ({
-        envelope: { ...e.envelope },
-        state: e.state,
-        correctsMessageId: e.correctsMessageId,
-      })),
+      entries: [...this.#entries.values()].map(copyEntry),
       activity: {
         ...this.#activity,
         perAgentCounts: { ...this.#activity.perAgentCounts },

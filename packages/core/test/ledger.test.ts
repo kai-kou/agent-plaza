@@ -277,6 +277,110 @@ describe('thread ledger snapshot / restore', () => {
     if (next.accepted) expect(next.entry.envelope.turnNumber).toBe(3);
   });
 
+  it('preserves the loop counters across restore: the pair cap still denies', () => {
+    const ledger = new ThreadLedger(config);
+    ledger.accept(envelope());
+    for (let i = 0; i < 6; i++) {
+      const fromA = i % 2 === 0;
+      ledger.accept(
+        envelope({
+          senderId: fromA ? 'agent-a' : 'agent-b',
+          recipientIds: [fromA ? 'agent-b' : 'agent-a'],
+          bodySha256: 'abcdef'[i]!.repeat(64),
+          hopCount: i + 1,
+        }),
+      );
+    }
+    const restored = ThreadLedger.restore(
+      JSON.parse(JSON.stringify(ledger.snapshot())) as unknown,
+      config,
+    );
+    const denied = restored.accept(
+      envelope({
+        senderId: 'agent-a',
+        recipientIds: ['agent-b'],
+        bodySha256: 'f'.repeat(64),
+        hopCount: 7,
+      }),
+    );
+    expect(denied.accepted).toBe(false);
+    if (!denied.accepted) expect(denied.reason).toBe('pair_roundtrip_cap');
+  });
+
+  it('preserves the correction counters across restore: the fourth correction still denies', () => {
+    const ledger = new ThreadLedger(config);
+    const original = ledger.accept(envelope({ senderId: 'agent-a' }));
+    if (!original.accepted) throw new Error('setup failed');
+    const target = original.entry.envelope.messageId;
+    const senders = ['agent-b', 'agent-a', 'agent-b'] as const;
+    for (let i = 0; i < 3; i++) {
+      const sender = senders[i]!;
+      ledger.accept(
+        envelope({
+          senderId: sender,
+          recipientIds: [sender === 'agent-a' ? 'agent-b' : 'agent-a'],
+          bodySha256: `${i + 1}`.repeat(64),
+        }),
+        { correctsMessageId: target },
+      );
+    }
+    const restored = ThreadLedger.restore(
+      JSON.parse(JSON.stringify(ledger.snapshot())) as unknown,
+      config,
+    );
+    const fourth = restored.accept(
+      envelope({
+        senderId: 'agent-a',
+        recipientIds: ['agent-b'],
+        bodySha256: '9'.repeat(64),
+      }),
+      { correctsMessageId: target },
+    );
+    expect(fourth.accepted).toBe(false);
+    if (!fourth.accepted) expect(fourth.reason).toBe('correction_round_cap');
+  });
+
+  it('throws on a snapshot whose nextTurn would reuse an assigned turn', () => {
+    const ledger = new ThreadLedger(config);
+    ledger.accept(envelope());
+    const snap = JSON.parse(JSON.stringify(ledger.snapshot())) as {
+      nextTurn: number;
+    };
+    snap.nextTurn = 1;
+    expect(() => ThreadLedger.restore(snap, config)).toThrow(TypeError);
+  });
+
+  it('throws on a snapshot whose idempotency index points at a missing entry', () => {
+    const ledger = new ThreadLedger(config);
+    ledger.accept(envelope());
+    const snap = JSON.parse(JSON.stringify(ledger.snapshot())) as {
+      idempotencyIndex: Record<string, string>;
+    };
+    snap.idempotencyIndex['idem-phantom'] = 'msg-missing';
+    expect(() => ThreadLedger.restore(snap, config)).toThrow(TypeError);
+  });
+
+  it('throws on a snapshot with an unknown entry state', () => {
+    const ledger = new ThreadLedger(config);
+    ledger.accept(envelope());
+    const snap = JSON.parse(JSON.stringify(ledger.snapshot())) as {
+      entries: { state: string }[];
+    };
+    snap.entries[0]!.state = 'levitating';
+    expect(() => ThreadLedger.restore(snap, config)).toThrow(TypeError);
+  });
+
+  it('returns entries as copies: mutating one does not affect the ledger', () => {
+    const ledger = new ThreadLedger(config);
+    const r = ledger.accept(envelope());
+    if (!r.accepted) throw new Error('setup failed');
+    r.entry.envelope.recipientIds.push('agent-b');
+    r.entry.state = 'completed';
+    const stored = ledger.getEntry(r.entry.envelope.messageId);
+    expect(stored?.envelope.recipientIds).toEqual(['agent-a']);
+    expect(stored?.state).toBe('durably_accepted');
+  });
+
   it('keeps the accepted envelope itself valid after turn assignment', () => {
     const ledger = new ThreadLedger(config);
     const r = ledger.accept(envelope());
