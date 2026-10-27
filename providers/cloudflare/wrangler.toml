@@ -1,0 +1,42 @@
+# agent-plaza hub — Cloudflare Workers configuration.
+# Replace the REPLACE_WITH_* placeholders with the ids printed by the
+# setup commands in README.md. No secrets live in this file; the Slack
+# signing secret is set with `wrangler secret put SLACK_SIGNING_SECRET`.
+name = "agent-plaza-hub"
+main = "src/worker.ts"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "agent-plaza"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[[queues.producers]]
+binding = "QUEUE"
+queue = "agent-plaza-delivery"
+
+[durable_objects]
+bindings = [
+  { name = "THREAD_LEDGER", class_name = "ThreadLedgerObject" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ThreadLedgerObject"]
+
+# Deployment-specific configuration. PARTICIPANTS_JSON is a JSON array of
+# core Participant objects; participant ids are the stable identities
+# (for Slack ingress, "slack:<user id>").
+# ALLOWED_CHANNEL_IDS_JSON is the channel allowlist (FR-1): set it to the
+# designated channel before deploying, e.g. "[\"C0000000000\"]". The "[]"
+# shipped here denies every channel (fail-closed).
+# Optional: BOT_PARTICIPANTS_JSON maps Slack bot_id -> participant id for
+# bot_message events without a user id; OWN_BOT_ID is this deployment's
+# own Slack bot_id, whose delivery echoes are ignored.
+[vars]
+PARTICIPANTS_JSON = "[]"
+ALLOWED_CHANNEL_IDS_JSON = "[]"
