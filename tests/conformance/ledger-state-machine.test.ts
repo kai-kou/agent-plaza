@@ -54,7 +54,11 @@ function envelope(): MessageEnvelope {
   };
 }
 
-/** Legal paths from the initial state to each stored state. */
+/**
+ * Legal paths from the initial state to each stored state. When a state is
+ * added to the spec, a path for it must be added here too; without one the
+ * sweep for that state fails loudly in setup rather than passing silently.
+ */
 const PATHS: Record<LedgerEntryState, LedgerEntryState[]> = {
   durably_accepted: [],
   queued: ['queued'],
@@ -81,15 +85,21 @@ function ledgerInState(state: LedgerEntryState): {
     const t = ledger.transition(messageId, step);
     if (!t.ok) throw new Error(`setup path to ${state} failed at ${step}`);
   }
+  const reached = ledger.getEntry(messageId);
+  if (reached?.state !== state) {
+    throw new Error(`setup path ended in ${reached?.state}, not ${state}`);
+  }
   return { ledger, messageId };
 }
 
 describe('spec/ledger-state-machine.json conformance', () => {
   it('the spec is internally consistent', () => {
     expect(spec.states).toContain(spec.initial);
+    expect(new Set(spec.states).size).toBe(spec.states.length);
     const keys = Object.keys(spec.transitions).sort();
     expect(keys).toEqual([...spec.states].sort());
     for (const targets of Object.values(spec.transitions)) {
+      expect(new Set(targets).size).toBe(targets.length);
       for (const target of targets) expect(spec.states).toContain(target);
     }
     const computedTerminal = spec.states
