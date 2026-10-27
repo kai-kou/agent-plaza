@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   validateEnvelope,
   type MessageEnvelope,
-} from '../src/conversation/envelope.js';
+} from '@agent-plaza/core';
 
 function valid(overrides: Partial<MessageEnvelope> = {}): MessageEnvelope {
   return {

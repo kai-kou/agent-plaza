@@ -6,7 +6,7 @@ import {
   pairKey,
   DEFAULT_LOOP_CAPS,
   type ThreadActivity,
-} from '../src/governance/loop-guard.js';
+} from '@agent-plaza/core';
 
 function activity(overrides: Partial<ThreadActivity> = {}): ThreadActivity {
   return {
