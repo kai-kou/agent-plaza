@@ -142,7 +142,7 @@ export class ThreadLedger {
           `snapshot entry fails envelope validation: ${v.errors.join('; ')}`,
         );
       }
-      if (!(entry.state in TRANSITIONS)) {
+      if (!Object.hasOwn(TRANSITIONS, entry.state)) {
         throw new TypeError(`snapshot entry has unknown state: ${String(entry.state)}`);
       }
       if (ledger.#entries.has(entry.envelope.messageId)) {

@@ -370,6 +370,16 @@ describe('thread ledger snapshot / restore', () => {
     expect(() => ThreadLedger.restore(snap, config)).toThrow(TypeError);
   });
 
+  it('throws on a snapshot whose entry state collides with Object.prototype keys', () => {
+    const ledger = new ThreadLedger(config);
+    ledger.accept(envelope());
+    const snap = JSON.parse(JSON.stringify(ledger.snapshot())) as {
+      entries: { state: string }[];
+    };
+    snap.entries[0]!.state = 'constructor';
+    expect(() => ThreadLedger.restore(snap, config)).toThrow(TypeError);
+  });
+
   it('returns entries as copies: mutating one does not affect the ledger', () => {
     const ledger = new ThreadLedger(config);
     const r = ledger.accept(envelope());
