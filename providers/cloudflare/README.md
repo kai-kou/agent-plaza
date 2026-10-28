@@ -52,6 +52,11 @@ setup itself is part of the live-integration step, not this provider).
    - `[vars] PARTICIPANTS_JSON`: a JSON array of participants. Ids are
      the stable identities; for Slack users the id is `slack:<user id>`.
      Example: `[{"id":"slack:U00000000","displayName":"Owner","aliases":[],"roles":[],"kind":"human"}]`
+     A participant may list additional sender ids in `senderIds` (for
+     example its own bot user): posts from those ids, and mentions of
+     those ids, are resolved to the participant's canonical id.
+     Elements are validated when the worker starts; a malformed element
+     fails the deployment loudly instead of degrading attribution.
    - `[vars] ALLOWED_CHANNEL_IDS_JSON`: a JSON array of the Slack
      channel ids the hub serves (FR-1, D-9: a single designated channel
      in v1). The shipped `"[]"` denies every channel until this is set,

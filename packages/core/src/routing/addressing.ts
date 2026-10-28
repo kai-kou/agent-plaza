@@ -14,6 +14,31 @@ export interface Participant {
   aliases: string[];
   roles: string[];
   kind: 'human' | 'agent';
+  /**
+   * Additional platform sender ids that attribute to this participant —
+   * e.g. the same agent posting through its own bot user while its
+   * canonical id names another sending account. Attribution and mention
+   * resolution map every listed id to `id` (see resolveParticipantId).
+   */
+  senderIds?: string[];
+}
+
+/**
+ * Resolve a platform sender id to the canonical participant id: the id
+ * itself when it names a participant, the owning participant's id when
+ * it is one of their `senderIds`, and the id unchanged when no
+ * participant claims it (unknown senders stay unknown).
+ */
+export function resolveParticipantId(
+  id: string,
+  participants: Participant[],
+): string {
+  for (const p of participants) {
+    if (p.id === id || (p.senderIds?.includes(id) ?? false)) {
+      return p.id;
+    }
+  }
+  return id;
 }
 
 export interface AddressingInput {

@@ -455,3 +455,39 @@ describe('handleSlackEvent', () => {
     expect(store.data.size).toBe(0);
   });
 });
+
+describe('sender alias resolution (senderIds)', () => {
+  const aliased: Participant[] = [
+    { id: 'slack:U100', displayName: 'Owner', aliases: [], roles: [], kind: 'human' },
+    {
+      id: 'slack:U300',
+      displayName: 'Beta',
+      aliases: ['Beta'],
+      roles: [],
+      kind: 'agent',
+      senderIds: ['slack:U301'],
+    },
+  ];
+
+  it('attributes a post from an alias sender id to the canonical participant', async () => {
+    const { deps } = makeDeps({ participants: aliased });
+    const r = await handleSlackEvent(
+      deps,
+      messageBody({ eventId: 'EvA1', user: 'U301', text: 'bot 経由の投稿' }),
+    );
+    expect(r.kind).toBe('accepted');
+    if (r.kind !== 'accepted') throw new Error('unreachable');
+    expect(r.entry.envelope.senderId).toBe('slack:U300');
+  });
+
+  it('resolves a mention of an alias sender id to the canonical participant', async () => {
+    const { deps } = makeDeps({ participants: aliased });
+    const r = await handleSlackEvent(
+      deps,
+      messageBody({ eventId: 'EvA2', user: 'U100', text: '<@U301> お願い' }),
+    );
+    expect(r.kind).toBe('accepted');
+    if (r.kind !== 'accepted') throw new Error('unreachable');
+    expect(r.entry.envelope.recipientIds).toEqual(['slack:U300']);
+  });
+});

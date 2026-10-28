@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   decideAddressing,
+  resolveParticipantId,
   type AddressingInput,
   type Participant,
 } from '@agent-plaza/core';
@@ -73,5 +74,33 @@ describe('addressing (FR-10 priority)', () => {
       participants,
     );
     expect(d).toEqual({ recipients: [], basis: 'none' });
+  });
+});
+
+describe('resolveParticipantId', () => {
+  const withAliases: Participant[] = [
+    ...participants,
+    {
+      id: 'agent-c',
+      displayName: 'Gamma',
+      aliases: ['Gamma'],
+      roles: [],
+      kind: 'agent',
+      senderIds: ['gamma-bot-user'],
+    },
+  ];
+
+  it('returns a canonical participant id unchanged', () => {
+    expect(resolveParticipantId('agent-a', withAliases)).toBe('agent-a');
+  });
+
+  it('resolves an alias sender id to the canonical participant id', () => {
+    expect(resolveParticipantId('gamma-bot-user', withAliases)).toBe('agent-c');
+  });
+
+  it('returns an unknown id unchanged', () => {
+    expect(resolveParticipantId('someone-else', withAliases)).toBe(
+      'someone-else',
+    );
   });
 });

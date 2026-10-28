@@ -422,3 +422,71 @@ describe('worker app (admin bot post route)', () => {
     });
   });
 });
+
+describe('PARTICIPANTS_JSON element validation', () => {
+  it('rejects a participant element without an id', () => {
+    const { env } = makeEnv(false);
+    env.PARTICIPANTS_JSON = JSON.stringify([
+      { displayName: 'NoId', aliases: [], roles: [], kind: 'agent' },
+    ]);
+    expect(() => createAppFromEnv(env)).toThrow(/PARTICIPANTS_JSON/);
+  });
+
+  it('rejects a senderIds that is not an array of strings', () => {
+    const { env } = makeEnv(false);
+    env.PARTICIPANTS_JSON = JSON.stringify([
+      {
+        id: 'slack:U300',
+        displayName: 'Beta',
+        aliases: [],
+        roles: [],
+        kind: 'agent',
+        senderIds: 'slack:U301',
+      },
+    ]);
+    expect(() => createAppFromEnv(env)).toThrow(/PARTICIPANTS_JSON/);
+  });
+
+  it('accepts a participant element with a valid senderIds list', () => {
+    const { env } = makeEnv(false);
+    env.PARTICIPANTS_JSON = JSON.stringify([
+      {
+        id: 'slack:U300',
+        displayName: 'Beta',
+        aliases: ['Beta'],
+        roles: [],
+        kind: 'agent',
+        senderIds: ['slack:U301'],
+      },
+    ]);
+    expect(() => createAppFromEnv(env)).not.toThrow();
+  });
+});
+
+describe('PARTICIPANTS_JSON sender-id uniqueness', () => {
+  it('rejects an alias claimed by two participants', () => {
+    const { env } = makeEnv(false);
+    env.PARTICIPANTS_JSON = JSON.stringify([
+      { id: 'slack:U300', displayName: 'Beta', aliases: [], roles: [], kind: 'agent', senderIds: ['slack:U301'] },
+      { id: 'slack:U400', displayName: 'Delta', aliases: [], roles: [], kind: 'agent', senderIds: ['slack:U301'] },
+    ]);
+    expect(() => createAppFromEnv(env)).toThrow(/PARTICIPANTS_JSON/);
+  });
+
+  it('rejects an alias that collides with another participant id', () => {
+    const { env } = makeEnv(false);
+    env.PARTICIPANTS_JSON = JSON.stringify([
+      { id: 'slack:U300', displayName: 'Beta', aliases: [], roles: [], kind: 'agent', senderIds: ['slack:U400'] },
+      { id: 'slack:U400', displayName: 'Delta', aliases: [], roles: [], kind: 'agent' },
+    ]);
+    expect(() => createAppFromEnv(env)).toThrow(/PARTICIPANTS_JSON/);
+  });
+
+  it('rejects an empty-string senderIds element', () => {
+    const { env } = makeEnv(false);
+    env.PARTICIPANTS_JSON = JSON.stringify([
+      { id: 'slack:U300', displayName: 'Beta', aliases: [], roles: [], kind: 'agent', senderIds: [''] },
+    ]);
+    expect(() => createAppFromEnv(env)).toThrow(/PARTICIPANTS_JSON/);
+  });
+});
