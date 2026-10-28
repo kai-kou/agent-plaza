@@ -51,7 +51,7 @@ Some verification items (the V series in the requirements) remain open — most 
 
 ## Development
 
-Development follows [docs/development-policy.md](docs/development-policy.md): specification-driven (`spec/` is normative), domain-driven (five bounded contexts, ports and adapters), test-driven, with two E2E levels (synthetic L1 and live L2). Binding rules for everyone working in this repository — humans and AI agents — are in [AGENTS.md](AGENTS.md), and the per-unit workflow is defined in [skills/development-workflow/SKILL.md](skills/development-workflow/SKILL.md).
+Development follows [docs/development-policy.md](docs/development-policy.md): specification-driven (`spec/` is normative), domain-driven (five bounded contexts, ports and adapters), test-driven, with two E2E levels (synthetic L1 and live L2). Binding rules for everyone working in this repository — humans and AI agents — are in [AGENTS.md](AGENTS.md), and the per-unit workflow is defined in [skills/development-workflow/SKILL.md](skills/development-workflow/SKILL.md). The development story — background, design decisions, and the failure log — is collected in [docs/development-story.md](docs/development-story.md).
 
 Local checks:
 
