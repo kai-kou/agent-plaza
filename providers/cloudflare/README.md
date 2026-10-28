@@ -139,7 +139,12 @@ setup itself is part of the live-integration step, not this provider).
   per-participant value from `DOORBELL_CAPABILITIES_JSON` (issued per
   reader, SEC-2); a wrong capability
   returns the same 404 as an unknown route, and the route is disabled
-  when no capability is configured. The response is the flag
+  when no capability is configured. Readers whose credential systems
+  cannot place a secret in a URL path can present the same capability
+  in a header instead — `GET /doorbell/<threadId>` with an
+  `Authorization: Bearer <capability>` or `X-Capability: <capability>`
+  header (when both headers are present they must agree) — with
+  identical response and failure behavior. The response is the flag
   (`{eventId, ts}`) or `{flag: null}` — never content. Treat the
   capability URL as a credential for the reader's local configuration
   only: never commit it. If a per-participant capability leaks,

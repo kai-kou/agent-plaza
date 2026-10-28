@@ -15,6 +15,16 @@
  *                       only the flag ({eventId, ts}) or {flag: null} —
  *                       never content — and a wrong capability is
  *                       indistinguishable from an unknown route (404).
+ * - GET  /doorbell/:threadId
+ *                       the header form of the same read route, for
+ *                       readers whose credential systems cannot place a
+ *                       secret in a URL path: the capability travels in
+ *                       an `Authorization: Bearer <capability>` or
+ *                       `X-Capability: <capability>` header instead.
+ *                       The same capability set, the same flag-only
+ *                       response, and the same indistinguishable 404
+ *                       apply; when both headers are present they must
+ *                       agree.
  * - POST /slack/events  Slack Events API ingress. The signature is
  *   verified first; url_verification challenges are answered inline.
  *   Message events are processed by the ingress core (slack-events.ts),
@@ -318,6 +328,42 @@ export function resolveDoorbellCapabilities(
   return capabilities;
 }
 
+/**
+ * Extract the doorbell capability presented through the headers of
+ * the header form of the read route: `Authorization: Bearer
+ * <capability>` or `X-Capability: <capability>`. An Authorization
+ * value that is not a Bearer credential vetoes the request outright
+ * (even when X-Capability carries a valid value), and when both
+ * headers are present they must agree; any of these failures is
+ * treated as no capability presented, so the route fails closed
+ * with the same 404 as any other failure.
+ */
+export function headerDoorbellCapability(
+  authorization: string | undefined,
+  xCapability: string | undefined,
+): string | undefined {
+  let bearer: string | undefined;
+  if (authorization !== undefined) {
+    const match = /^Bearer\s+(\S+)$/i.exec(authorization.trim());
+    if (match === null) {
+      return undefined;
+    }
+    bearer = match[1];
+  }
+  const headerValue =
+    xCapability === undefined || xCapability.trim() === ''
+      ? undefined
+      : xCapability.trim();
+  if (
+    bearer !== undefined &&
+    headerValue !== undefined &&
+    bearer !== headerValue
+  ) {
+    return undefined;
+  }
+  return bearer ?? headerValue;
+}
+
 /** Same fail-closed rule as the doorbell capability. */
 export const MIN_ADMIN_CAPABILITY_LENGTH = 16;
 
@@ -371,6 +417,25 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
     if (
       doorbellCapabilities === undefined ||
       !doorbellCapabilities.has(c.req.param('capability'))
+    ) {
+      return c.json({ error: 'not found' }, 404);
+    }
+    const flag = await deps.doorbell.peek(c.req.param('threadId'));
+    return flag === null ? c.json({ flag: null }) : c.json(flag);
+  });
+
+  // Header form of the doorbell read route: same capability set and
+  // the same indistinguishable 404, with the capability presented in
+  // a header instead of the path.
+  app.get('/doorbell/:threadId', async (c) => {
+    const presented = headerDoorbellCapability(
+      c.req.header('authorization'),
+      c.req.header('x-capability'),
+    );
+    if (
+      doorbellCapabilities === undefined ||
+      presented === undefined ||
+      !doorbellCapabilities.has(presented)
     ) {
       return c.json({ error: 'not found' }, 404);
     }
