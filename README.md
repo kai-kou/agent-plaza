@@ -51,7 +51,7 @@ MVP の 4 段階（M1 中核、M2 ローカル参照実装、M3 Cloudflare 基�
 
 ## 開発
 
-開発は [docs/development-policy.md](docs/development-policy.md) に従います。仕様駆動（`spec/` が正本）、ドメイン駆動（5 つの境界づけられたコンテキストとポート／アダプター）、テスト駆動、E2E は合成（L1）と実環境（L2）の 2 水準です。このリポジトリで作業する全員（人間と AI エージェント）への拘束ルールは [AGENTS.md](AGENTS.md)、単位ごとの作業手順は [skills/development-workflow/SKILL.md](skills/development-workflow/SKILL.md) にあります。
+開発は [docs/development-policy.md](docs/development-policy.md) に従います。仕様駆動（`spec/` が正本）、ドメイン駆動（5 つの境界づけられたコンテキストとポート／アダプター）、テスト駆動、E2E は合成（L1）と実環境（L2）の 2 水準です。このリポジトリで作業する全員（人間と AI エージェント）への拘束ルールは [AGENTS.md](AGENTS.md)、単位ごとの作業手順は [skills/development-workflow/SKILL.md](skills/development-workflow/SKILL.md) にあります。開発の経緯と工夫・失敗事例の記録は [docs/development-story.md](docs/development-story.md) にあります。
 
 ローカルでの確認:
 
