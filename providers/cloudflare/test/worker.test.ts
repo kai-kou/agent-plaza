@@ -422,3 +422,43 @@ describe('worker app (admin bot post route)', () => {
     });
   });
 });
+
+describe('PARTICIPANTS_JSON element validation', () => {
+  it('rejects a participant element without an id', () => {
+    const { env } = makeEnv(false);
+    env.PARTICIPANTS_JSON = JSON.stringify([
+      { displayName: 'NoId', aliases: [], roles: [], kind: 'agent' },
+    ]);
+    expect(() => createAppFromEnv(env)).toThrow(/PARTICIPANTS_JSON/);
+  });
+
+  it('rejects a senderIds that is not an array of strings', () => {
+    const { env } = makeEnv(false);
+    env.PARTICIPANTS_JSON = JSON.stringify([
+      {
+        id: 'slack:U300',
+        displayName: 'Beta',
+        aliases: [],
+        roles: [],
+        kind: 'agent',
+        senderIds: 'slack:U301',
+      },
+    ]);
+    expect(() => createAppFromEnv(env)).toThrow(/PARTICIPANTS_JSON/);
+  });
+
+  it('accepts a participant element with a valid senderIds list', () => {
+    const { env } = makeEnv(false);
+    env.PARTICIPANTS_JSON = JSON.stringify([
+      {
+        id: 'slack:U300',
+        displayName: 'Beta',
+        aliases: ['Beta'],
+        roles: [],
+        kind: 'agent',
+        senderIds: ['slack:U301'],
+      },
+    ]);
+    expect(() => createAppFromEnv(env)).not.toThrow();
+  });
+});

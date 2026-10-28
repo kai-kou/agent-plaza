@@ -108,6 +108,29 @@ function parseParticipantArray(raw: string): Participant[] {
   if (!Array.isArray(parsed)) {
     throw new Error('PARTICIPANTS_JSON must be a JSON array');
   }
+  const isStringArray = (v: unknown): v is string[] =>
+    Array.isArray(v) && v.every((x) => typeof x === 'string');
+  for (const el of parsed) {
+    if (
+      typeof el !== 'object' ||
+      el === null ||
+      Array.isArray(el) ||
+      typeof (el as { id?: unknown }).id !== 'string' ||
+      (el as { id: string }).id === '' ||
+      typeof (el as { displayName?: unknown }).displayName !== 'string' ||
+      !isStringArray((el as { aliases?: unknown }).aliases) ||
+      !isStringArray((el as { roles?: unknown }).roles) ||
+      ((el as { kind?: unknown }).kind !== 'human' &&
+        (el as { kind?: unknown }).kind !== 'agent') ||
+      ((el as { senderIds?: unknown }).senderIds !== undefined &&
+        !isStringArray((el as { senderIds?: unknown }).senderIds))
+    ) {
+      throw new Error(
+        'PARTICIPANTS_JSON elements must be participant objects ' +
+          '{id, displayName, aliases[], roles[], kind, senderIds?[]}',
+      );
+    }
+  }
   return parsed as Participant[];
 }
 

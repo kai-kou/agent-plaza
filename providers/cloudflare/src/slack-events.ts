@@ -38,6 +38,7 @@
 import {
   ThreadLedger,
   decideAddressing,
+  resolveParticipantId,
   type LedgerEntry,
   type LedgerStore,
   type LoopCaps,
@@ -212,6 +213,12 @@ export async function handleSlackEvent(
   } else if (botOrigin && event.bot_id !== undefined) {
     senderId = deps.botParticipants?.[event.bot_id] ?? null;
   }
+  if (senderId !== null) {
+    // Normalize alias sender ids (a participant's own bot user, etc.)
+    // to the canonical participant id, so attribution, addressing, and
+    // the loop guard all see one identity per participant.
+    senderId = resolveParticipantId(senderId, deps.participants);
+  }
   if (senderId === null) {
     return botOrigin
       ? { kind: 'ignored', reason: 'bot_message without an attributable sender' }
@@ -276,7 +283,9 @@ async function processMessage(
   const senderId = ctx.senderId;
   const mentionedIds = [
     ...ctx.text.matchAll(/<@([A-Z0-9]+)>/g),
-  ].map((m) => slackParticipantId(m[1]!));
+  ].map((m) =>
+    resolveParticipantId(slackParticipantId(m[1]!), deps.participants),
+  );
 
   // Thread continuation nominates the author of the thread root, when the
   // root is in the ledger (its bodyRef ends with the root's Slack ts).
