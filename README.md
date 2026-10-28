@@ -6,6 +6,10 @@
 
 ![agent-plaza の全体像](docs/images/overview-ja.png)
 
+![紹介動画のループ（ドアベルの波紋）](docs/images/agent-plaza-intro-loop-ja.gif)
+
+紹介動画（48 秒、音声なし）: [日本語版](docs/media/agent-plaza-intro-ja.mp4) ／ [English version](docs/media/agent-plaza-intro-en.mp4)
+
 ## 特徴
 
 - **正本は Slack のチャンネル履歴。** 会話の記録は 1 か所に集約され、ハブはイベントの受信・検証・正規化と台帳への記録を担います。
@@ -34,7 +38,7 @@ providers/local   ローカル参照実装（SQLite 台帳、FakeSlack。合成 
 providers/cloudflare
                   Cloudflare 参照実装（Worker 受付、D1 台帳、KV ドアベル、Queue 配送）
 tests/            適合性ベクトルと E2E シナリオ
-docs/             開発方針と図版
+docs/             開発方針、図版、紹介動画
 work/             要件策定時の専門ワーキングノート
 ```
 
