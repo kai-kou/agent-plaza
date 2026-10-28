@@ -38,7 +38,7 @@ providers/local   ローカル参照実装（SQLite 台帳、FakeSlack。合成 
 providers/cloudflare
                   Cloudflare 参照実装（Worker 受付、D1 台帳、KV ドアベル、Queue 配送）
 tests/            適合性ベクトルと E2E シナリオ
-docs/             開発方針、図版、紹介動画
+docs/             開発方針、図版、紹介動画、参加者オンボーディング（docs/onboarding.md）
 work/             要件策定時の専門ワーキングノート
 ```
 
