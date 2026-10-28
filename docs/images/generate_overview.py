@@ -2,6 +2,13 @@
 """agent-plaza infographic generator (JA / EN).
 
 Draws a 2480x1650 architecture infographic with PIL using Noto Sans CJK.
+
+Usage:
+    python3 generate_overview.py <output-ja.png> <output-en.png>
+
+Requires Pillow and the Noto Sans CJK fonts. FONT_REG / FONT_BOLD are
+absolute system paths; adjust them if your environment installs the
+fonts elsewhere.
 """
 from __future__ import annotations
 
@@ -104,7 +111,7 @@ L = {
         hub="ハブ（Cloudflare 参照実装）",
         verify=("署名検証", "Slack イベントを受付"),
         ledger=("台帳 Ledger", "受付・採番・冪等化\n（D1 / Durable Objects）"),
-        doorbell=("ドアベル", "本文を運ばない合図だけ\n{ eventId, ts }（KV）"),
+        doorbell=("ドアベル", "本文を運ばない合図だけ\n{ event_id, ts }（KV）"),
         queue=("配送キュー", "配送と再試行（Queues）"),
         flow=("投稿 → 検証 → 台帳に記録 → ドアベルが鳴る → 各自の認証経路で本文を取得 → スレッドで返信",),
         proto="プロトコル",
@@ -137,13 +144,13 @@ L = {
         tierA=("Tier A", "Native bot", "Resident Slack app"),
         tierB=("Tier B", "Product trigger", "Woken by product events"),
         tierC=("Tier C", "Doorbell + wake", "Woken by a signal, fetches itself"),
-        tierD=("Tier D", "Periodic check", "Polls on an interval"),
+        tierD=("Tier D", "Periodic monitoring", "Polls on an interval"),
         channel="Designated Slack channel",
         channel_note="The channel history is the canonical record",
         hub="Hub (Cloudflare reference implementation)",
         verify=("Signature check", "Receives Slack events"),
         ledger=("Ledger", "Accept, sequence, dedupe\n(D1 / Durable Objects)"),
-        doorbell=("Doorbell", "A signal only, no body\n{ eventId, ts } (KV)"),
+        doorbell=("Doorbell", "A signal only, no body\n{ event_id, ts } (KV)"),
         queue=("Delivery queue", "Delivery and retries (Queues)"),
         flow=("Post → verify → record in the ledger → doorbell rings → each agent fetches via its own authenticated path → replies in thread",),
         proto="Protocol",
@@ -196,7 +203,10 @@ def render(lang: str, out: str):
         box(d, [px, y, px + pw, y + 118])
         d.ellipse([px + 24, y + 30, px + 82, y + 88], fill=color)
         text(d, (px + 53, y + 60), mark, 32, fill=DARK_INK, bold=True, anchor="mm")
-        text(d, (px + 104, y + 18), name, 35, fill=TITLE, bold=True)
+        name_size = 35
+        while name_size > 20 and d.textlength(name, font=font(name_size, True)) > pw - 104 - 16:
+            name_size -= 1
+        text(d, (px + 104, y + 18), name, name_size, fill=TITLE, bold=True)
         text(d, (px + 104, y + 68), note, 28, fill=SMALL)
         y += 138
 
@@ -273,5 +283,8 @@ def render(lang: str, out: str):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("usage: generate_overview.py <output-ja.png> <output-en.png>", file=sys.stderr)
+        raise SystemExit(2)
     render("ja", sys.argv[1])
     render("en", sys.argv[2])

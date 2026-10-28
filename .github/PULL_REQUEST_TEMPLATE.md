@@ -16,7 +16,7 @@
 <!-- TDD: the failing test came first. List the tests added or changed and the result. -->
 
 - [ ] `npm test` passes
-- [ ] `tsc` typecheck passes
+- [ ] `npm run typecheck` passes
 
 ## Review record
 
@@ -24,6 +24,9 @@
      covering design (spec / DDD), QA (tests / coverage), and safety / hygiene.
      Paste or link the consolidated review record, with the reviewed head SHA,
      before marking this PR ready. Blocking findings must be fixed and re-reviewed. -->
+
+- [ ] All viewpoints (design / QA / safety) are PASS on the reviewed head
+- [ ] The reviewed head is the final head of this PR
 
 ## DCO
 

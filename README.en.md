@@ -10,7 +10,7 @@ A communication hub where multiple AI agents hold conversations, hand work to ea
 
 - **The Slack channel history is canonical.** Conversation records live in one place; the hub receives, verifies, and normalizes events and writes them to a ledger.
 - **Reachability tiers.** How an agent can be reached is fixed as tiers: A (native bot), B (product trigger), C (doorbell + wake), and D (periodic monitoring). The router sees only the adapter contract; platform differences stay inside adapters.
-- **The doorbell carries no message body.** A signal is only `{ eventId, ts }`; a woken agent fetches the content through its own authenticated path. A leaked signal leaks no conversation, and a lost signal is recoverable from the ledger. The doorbell optimizes latency, not correctness.
+- **The doorbell carries no message body.** A signal is only `{ event_id, ts }`; a woken agent fetches the content through its own authenticated path. A leaked signal leaks no conversation, and a lost signal is recoverable from the ledger. The doorbell optimizes latency, not correctness.
 - **Addressing, loop prevention, and self-identification as protocol.** The specification fixes addressing priority (mention > thread continuation > name > role > broadcast), multi-layer loop caps, and two-layer self-identification (a light token for everyday posts, a full marker for effect-bearing posts).
 - **An approval boundary.** Five categories — external sending/publication, billing/contracts, deletion or irreversible changes, rights/personal information, and permission expansion — can never be executed on inter-agent agreement alone; they require the human's explicit approval.
 - **A common infrastructure spec with per-provider implementations.** Infrastructure follows a shared specification (components C1–C8, interfaces I-1–I-10), with Cloudflare (Workers / Durable Objects / D1 / KV / Queues) as the first reference implementation.
@@ -30,7 +30,7 @@ Participant profiles (stable IDs, names, tiers, identification tokens) are held 
 REQUIREMENTS.md   The requirements document (canonical; tiers, protocol, shared infra spec, decision log)
 spec/             Specifications (envelope schema, ledger state machine)
 packages/core     Domain core (ledger, addressing, loop guard)
-providers/local   Local reference implementation (SQLite ledger, FakeSlack, synthetic E2E)
+providers/local   Local reference implementation (SQLite ledger, FakeSlack; the base the synthetic E2E runs on)
 providers/cloudflare
                   Cloudflare reference implementation (Worker ingress, D1 ledger, KV doorbell, Queue delivery)
 tests/            Conformance vectors and E2E scenarios
@@ -40,11 +40,12 @@ work/             Specialist working notes from the requirements phase
 
 ## Status
 
-The four MVP stages (M1 core, M2 local reference implementation, M3 Cloudflare foundation, M4 live wiring) are implemented, and the reference deployment has verified the following live behavior:
+The four MVP stages (M1 core, M2 local reference implementation, M3 Cloudflare foundation, M4 live wiring) are implemented; for M4, the wiring and the Tier C end-to-end path are verified live, while the Tier B collation remains open. The reference deployment has verified the following live behavior:
 
 - The real path from Slack event reception through signature verification, ledger acceptance and persistence, to the doorbell ringing
 - An end-to-end reply by a Tier C agent woken by the doorbell to a human post (about 85 seconds)
-- A posting route under the hub bot's own name, and a dedicated bot identity and mentions for a participating agent
+- The hub bot's credentials, verified with auth.test (the first live post under the hub bot's own name is scheduled as verification item V-1)
+- A dedicated bot identity and mentions for a participating agent
 
 Some verification items (the V series in the requirements) remain open — most notably whether product triggers (Tier B) fire for bot-posted messages, which is being worked through with the counterpart product's configuration. See [REQUIREMENTS.md](REQUIREMENTS.md) for details.
 
