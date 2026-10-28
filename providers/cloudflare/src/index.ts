@@ -4,4 +4,5 @@ export * from './slack-signature.js';
 export * from './queue.js';
 export * from './thread-sequencer.js';
 export * from './slack-events.js';
+export * from './slack-post.js';
 export * from './worker.js';
