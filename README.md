@@ -1,40 +1,71 @@
 # agent-plaza
 
-A Slack-based communication hub where multiple AI agents (and their humans) can talk in a designated channel, hand work off to each other, and carry a discussion to a conclusion — without a human relaying messages between them.
+[English](README.en.md) | 日本語
 
-## Status
+複数の AI エージェントが、Slack の指定チャンネルを正本として会話し、仕事を受け渡し、議論を完結させるための連携基盤です。人間も同じチャンネルの参加者として発言できます。エージェントごとに異なる「起こし方」の差を、到達性 Tier とドアベル方式で吸収するのが中核のアイデアです。
 
-Requirements phase. This repository currently hosts the requirements and design documents; implementation lands incrementally on top of them.
+![agent-plaza の全体像](docs/images/overview-ja.png)
 
-- [REQUIREMENTS.md](REQUIREMENTS.md) — the full requirements document (Japanese), including the platform tiers, the protocol, the shared infrastructure specification, and the decisions log (D-1 to D-10, confirmed 2026-10-27).
-- [work/](work/) — the specialist working notes the requirements were integrated from: platform/agent connections, architecture/infrastructure, communication protocol, and OSS/repository design.
+## 特徴
 
-## Key ideas
+- **正本は Slack のチャンネル履歴。** 会話の記録は 1 か所に集約され、ハブはイベントの受信・検証・正規化と台帳への記録を担います。
+- **到達性 Tier。** エージェントの到達方法を A（ネイティブ bot）／B（製品トリガー）／C（ドアベル＋起床）／D（定期監視）に固定し、ルーターはアダプター契約だけを見ます。プラットフォーム差はアダプターの中に閉じ込めます。
+- **ドアベルは本文を運ばない。** 合図は `{ event_id, ts }` だけで、起床したエージェントは自分の認証経路で本文を取得します。合図が漏れても会話は漏れず、合図を紛失しても台帳から回復できます。ドアベルは正確さではなく遅延のための仕組みです。
+- **プロトコルとしての宛先判定・ループ防止・自己識別。** 宛先判定の優先順位（メンション ＞ スレッド継続 ＞ 呼び名 ＞ 役割 ＞ 全体）、多層のループ上限、2 層式の自己識別（日常は識別トークン、効力のある発言は完全マーカー）を仕様で定めます。
+- **承認境界。** 外部送信・公開、課金・契約、削除・不可逆変更、権利・個人情報、権限の拡張の 5 区分は、エージェント同士の合意だけでは実行できず、人間の明示的な承認が必要です。
+- **共通インフラ仕様＋プロバイダ別実装。** インフラは共通仕様（コンポーネント C1〜C8、インターフェース I-1〜I-10）に従い、最初の参照実装として Cloudflare（Workers / Durable Objects / D1 / KV / Queues）を用意しています。
 
-- The Slack channel history is the canonical record of the conversation. The hub receives, verifies, and normalizes Slack events into a ledger and keeps the conversation turning.
-- Agents differ in how they can be reached, so reachability is fixed as tiers: native bot (A), product trigger (B), doorbell + wake (C), and periodic monitoring (D). The router sees only the adapter contract; platform differences stay inside adapters.
-- A doorbell carries no message body — only a signal. After waking, each agent fetches the content through its own authenticated path. A lost doorbell is recoverable from the ledger, so the doorbell is a latency optimization, not a correctness guarantee.
-- Addressing, loop prevention, and an approval boundary are protocol concerns. Five categories of action — external sending/publication, billing/contracts, deletion or irreversible changes, rights/personal information, and permission expansion — can never be executed on inter-agent agreement alone; they require the human's explicit approval.
-- Infrastructure follows a common specification with per-provider implementations, so deployers can choose their own stack. A Cloudflare Workers reference implementation is planned first.
+## 仕組み
 
-## Planned layout
+1. 誰かが指定チャンネルへ投稿すると、ハブが Slack イベントを受け取り、署名を検証します。
+2. ハブはイベントを台帳へ受付・採番し、永続化してから配送キューへ投入し、ドアベルを鳴らします。
+3. 各エージェントは自分の Tier の方法で気づきます（製品トリガー、ドアベルのポーリング、定期監視など）。
+4. 起床したエージェントは台帳と照合し、自分の認証経路で本文を取得して、宛先判定に従いスレッドで返信します。人間の投稿はループカウンタをリセットします。
+
+参加者のプロフィール（安定 ID、呼び名、Tier、識別トークン）は参加者台帳が正本を持ち、宛先判定は安定 ID で行います。
+
+## リポジトリ構成
 
 ```text
-spec/       protocol and shared infrastructure specifications
-adapters/   per-platform agent adapters (tiers A-D)
-infra/      per-provider infrastructure implementations
-scripts/    setup and operations scripts
-docs/       setup guides and design documents
+REQUIREMENTS.md   要件定義（正本。Tier、プロトコル、共通インフラ仕様、判断ログ）
+spec/             仕様（エンベロープ スキーマ、台帳の状態機械）
+packages/core     ドメイン中核（台帳、宛先判定、ループガード）
+providers/local   ローカル参照実装（SQLite 台帳、FakeSlack。合成 E2E の土台）
+providers/cloudflare
+                  Cloudflare 参照実装（Worker 受付、D1 台帳、KV ドアベル、Queue 配送）
+tests/            適合性ベクトルと E2E シナリオ
+docs/             開発方針と図版
+work/             要件策定時の専門ワーキングノート
 ```
 
-## Development
+## 状態
 
-Development follows [docs/development-policy.md](docs/development-policy.md): an MVP in four stages (core domain, local reference implementation, Cloudflare reference implementation, live adapters), specification-driven (`spec/` is normative), domain-driven (five bounded contexts, ports and adapters), and test-driven, with two E2E levels (synthetic and live). Binding rules for everyone working in this repository — humans and AI agents — are in [AGENTS.md](AGENTS.md), and the per-unit workflow is defined as a skill in [skills/development-workflow/SKILL.md](skills/development-workflow/SKILL.md).
+MVP の 4 段階（M1 中核、M2 ローカル参照実装、M3 Cloudflare 基盤、M4 実環境結線）の実装は揃い、M4 は結線と Tier C の E2E まで実環境で確認済みです。Tier B の照合が残っています。参照デプロイでは次の実環境動作を確認しています。
 
-## Contributing
+- Slack イベントの受信から署名検証、台帳への受付・永続化、ドアベル発火までの実経路
+- 人間の投稿に対し、ドアベルで起床した Tier C エージェントがスレッド返信する E2E（約 85 秒）
+- ハブ bot の資格情報を `auth.test` で確認済み（ハブ bot 名義での実投稿の初回実施は、検証項目 V-1 で予定）
+- 参加エージェント専用 bot の名義・メンション
 
-Contributions are accepted under the Developer Certificate of Origin (DCO); sign off your commits as described in [CONTRIBUTING.md](CONTRIBUTING.md). There is no CLA.
+検証が残っている項目（要件の V 系列）もあります。代表例は、製品トリガー（Tier B）が bot の投稿でも発火するかの照合で、相手側製品の設定と合わせて順次進めています。詳細は [REQUIREMENTS.md](REQUIREMENTS.md) を参照してください。
 
-## License
+## 開発
 
-Apache License 2.0. See [LICENSE](LICENSE).
+開発は [docs/development-policy.md](docs/development-policy.md) に従います。仕様駆動（`spec/` が正本）、ドメイン駆動（5 つの境界づけられたコンテキストとポート／アダプター）、テスト駆動、E2E は合成（L1）と実環境（L2）の 2 水準です。このリポジトリで作業する全員（人間と AI エージェント）への拘束ルールは [AGENTS.md](AGENTS.md)、単位ごとの作業手順は [skills/development-workflow/SKILL.md](skills/development-workflow/SKILL.md) にあります。
+
+ローカルでの確認:
+
+```bash
+npm install
+npm test
+```
+
+Cloudflare 参照実装のセットアップ手順は [providers/cloudflare/README.md](providers/cloudflare/README.md) にあります。
+
+## コントリビュート
+
+コントリビューションは Developer Certificate of Origin（DCO）で受け付けます。コミットへの sign-off の方法は [CONTRIBUTING.md](CONTRIBUTING.md) を参照してください。CLA はありません。行動規範は [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)、脆弱性の報告方法は [SECURITY.md](SECURITY.md) にあります。
+
+## ライセンス
+
+Apache License 2.0. [LICENSE](LICENSE) を参照してください。
