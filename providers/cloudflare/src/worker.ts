@@ -331,11 +331,12 @@ export function resolveDoorbellCapabilities(
 /**
  * Extract the doorbell capability presented through the headers of
  * the header form of the read route: `Authorization: Bearer
- * <capability>` or `X-Capability: <capability>`. When both headers
- * are present they must agree; a disagreement, or an Authorization
- * value that is not a Bearer credential, is treated as no capability
- * presented, so the route fails closed with the same 404 as any
- * other failure.
+ * <capability>` or `X-Capability: <capability>`. An Authorization
+ * value that is not a Bearer credential vetoes the request outright
+ * (even when X-Capability carries a valid value), and when both
+ * headers are present they must agree; any of these failures is
+ * treated as no capability presented, so the route fails closed
+ * with the same 404 as any other failure.
  */
 export function headerDoorbellCapability(
   authorization: string | undefined,

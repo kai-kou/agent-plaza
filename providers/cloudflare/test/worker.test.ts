@@ -368,6 +368,15 @@ describe('worker app (doorbell read route)', () => {
       eventId: 'Ev1',
       ts: '2026-10-27T00:00:00.000Z',
     });
+
+    const okHeader = await app.request(doorbellHeaderUrl(THREAD), {
+      headers: { 'x-capability': CAP2 },
+    });
+    expect(okHeader.status).toBe(200);
+    expect(await okHeader.json()).toEqual({
+      eventId: 'Ev1',
+      ts: '2026-10-27T00:00:00.000Z',
+    });
   });
 
   it('rejects the header form with the same indistinguishable 404', async () => {
@@ -389,6 +398,9 @@ describe('worker app (doorbell read route)', () => {
       // Both headers present but disagreeing, one of them valid.
       { authorization: `Bearer ${CAP}`, 'x-capability': 'nope-capability-value' },
       { authorization: 'Bearer nope-capability-value', 'x-capability': CAP },
+      // A malformed Authorization vetoes an otherwise valid X-Capability.
+      { authorization: `Basic ${CAP}`, 'x-capability': CAP },
+      { authorization: CAP, 'x-capability': CAP },
     ];
     for (const headers of attempts) {
       const res = await app.request(url, { headers });
@@ -401,6 +413,25 @@ describe('worker app (doorbell read route)', () => {
       headers: { authorization: `Bearer ${CAP}`, 'x-capability': CAP },
     });
     expect(ok.status).toBe(200);
+  });
+
+  it('rejects duplicated capability headers instead of combining them', async () => {
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+
+    // Sending the same header twice makes the platform combine the
+    // values, which must not authenticate as the single capability.
+    const headers = new Headers();
+    headers.append('x-capability', CAP);
+    headers.append('x-capability', CAP);
+    const res = await app.request(doorbellHeaderUrl(THREAD), { headers });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'not found' });
   });
 
   it('keeps the header form disabled when no capability is configured', async () => {
