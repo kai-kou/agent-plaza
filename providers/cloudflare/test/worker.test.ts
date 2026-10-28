@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createHmac } from 'node:crypto';
 import {
   ThreadLedgerObject,
@@ -263,5 +263,162 @@ describe('worker app (Durable Object route)', () => {
     expect(await res.json()).toEqual({ ok: true, kind: 'accepted' });
     expect(routedThreads).toEqual(['C1:1793100000.000100']);
     expect(db.rows.has('C1:1793100000.000100')).toBe(true);
+  });
+});
+
+describe('worker app (admin bot post route)', () => {
+  const ADMIN_CAP = 'test-admin-capability-0123456789';
+  const BOT_TOKEN = 'xoxb-test-bot-token';
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubSlackFetch(response: unknown): { calls: unknown[] } {
+    const calls: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (url: unknown, init: unknown) => {
+        calls.push({ url, init });
+        return { json: async () => response };
+      },
+    );
+    return { calls };
+  }
+
+  function postRequest(
+    capability: string | undefined,
+    body: unknown,
+  ): Request {
+    return new Request('http://hub.test/admin/post', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(capability === undefined
+          ? {}
+          : { 'x-admin-capability': capability }),
+      },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    });
+  }
+
+  function makeAdminEnv() {
+    const { env } = makeEnv(false);
+    env.ADMIN_CAPABILITY = ADMIN_CAP;
+    env.SLACK_BOT_TOKEN = BOT_TOKEN;
+    env.ALLOWED_CHANNEL_IDS_JSON = '["C1"]';
+    return env;
+  }
+
+  it('posts as the hub bot to an allowlisted channel', async () => {
+    const { calls } = stubSlackFetch({ ok: true, ts: '1793100002.000300' });
+    const app = createAppFromEnv(makeAdminEnv());
+    const res = await app.fetch(
+      postRequest(ADMIN_CAP, { channel: 'C1', text: 'APV1 test' }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, ts: '1793100002.000300' });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('passes thread_ts through for thread replies', async () => {
+    const { calls } = stubSlackFetch({ ok: true, ts: '1793100003.000400' });
+    const app = createAppFromEnv(makeAdminEnv());
+    const res = await app.fetch(
+      postRequest(ADMIN_CAP, {
+        channel: 'C1',
+        text: 'reply',
+        thread_ts: '1793100000.000100',
+      }),
+    );
+    expect(res.status).toBe(200);
+    const sent = calls[0] as {
+      init: { body: string };
+    };
+    expect(JSON.parse(sent.init.body)).toEqual({
+      channel: 'C1',
+      text: 'reply',
+      thread_ts: '1793100000.000100',
+    });
+  });
+
+  it('is indistinguishable from an unknown route without the capability', async () => {
+    stubSlackFetch({ ok: true, ts: '1.2' });
+    const app = createAppFromEnv(makeAdminEnv());
+    const missing = await app.fetch(
+      postRequest(undefined, { channel: 'C1', text: 'hi' }),
+    );
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: 'not found' });
+    const wrong = await app.fetch(
+      postRequest('nope', { channel: 'C1', text: 'hi' }),
+    );
+    expect(wrong.status).toBe(404);
+    expect(await wrong.json()).toEqual({ error: 'not found' });
+  });
+
+  it('is disabled when the capability or the bot token is not configured', async () => {
+    const { calls } = stubSlackFetch({ ok: true, ts: '1.2' });
+    const noCap = makeAdminEnv();
+    delete noCap.ADMIN_CAPABILITY;
+    const resNoCap = await createAppFromEnv(noCap).fetch(
+      postRequest(ADMIN_CAP, { channel: 'C1', text: 'hi' }),
+    );
+    expect(resNoCap.status).toBe(404);
+
+    const shortCap = makeAdminEnv();
+    shortCap.ADMIN_CAPABILITY = 'short';
+    const resShort = await createAppFromEnv(shortCap).fetch(
+      postRequest('short', { channel: 'C1', text: 'hi' }),
+    );
+    expect(resShort.status).toBe(404);
+
+    const noToken = makeAdminEnv();
+    delete noToken.SLACK_BOT_TOKEN;
+    const resNoToken = await createAppFromEnv(noToken).fetch(
+      postRequest(ADMIN_CAP, { channel: 'C1', text: 'hi' }),
+    );
+    expect(resNoToken.status).toBe(404);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects channels outside the allowlist without calling Slack', async () => {
+    const { calls } = stubSlackFetch({ ok: true, ts: '1.2' });
+    const app = createAppFromEnv(makeAdminEnv());
+    const res = await app.fetch(
+      postRequest(ADMIN_CAP, { channel: 'C2', text: 'hi' }),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'channel not allowed' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects empty or oversized text and malformed bodies', async () => {
+    const { calls } = stubSlackFetch({ ok: true, ts: '1.2' });
+    const app = createAppFromEnv(makeAdminEnv());
+    const empty = await app.fetch(
+      postRequest(ADMIN_CAP, { channel: 'C1', text: '' }),
+    );
+    expect(empty.status).toBe(400);
+    const oversized = await app.fetch(
+      postRequest(ADMIN_CAP, { channel: 'C1', text: 'x'.repeat(4001) }),
+    );
+    expect(oversized.status).toBe(400);
+    const malformed = await app.fetch(postRequest(ADMIN_CAP, 'not json'));
+    expect(malformed.status).toBe(400);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('maps a Slack error to 502 with the Slack error code', async () => {
+    stubSlackFetch({ ok: false, error: 'channel_not_found' });
+    const app = createAppFromEnv(makeAdminEnv());
+    const res = await app.fetch(
+      postRequest(ADMIN_CAP, { channel: 'C1', text: 'hi' }),
+    );
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      ok: false,
+      error: 'channel_not_found',
+    });
   });
 });

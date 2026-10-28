@@ -19,6 +19,13 @@
  *   Object namespace is bound — inside the Durable Object that owns the
  *   thread, which is what makes per-thread serialization hold across
  *   isolates. The Durable Object runs the same ingress core.
+ * - POST /admin/post    Operator-only posting as the hub bot. Guarded
+ *   by a dedicated capability header (ADMIN_CAPABILITY) and the bot
+ *   token secret (SLACK_BOT_TOKEN); the route is disabled — and
+ *   indistinguishable from an unknown route — when either is not
+ *   configured. Posts go only to allowlisted channels. This is how the
+ *   operator makes the hub bot speak (announcements, interop tests);
+ *   it is not a general delivery consumer.
  *
  * Bindings and secrets are described in providers/cloudflare/README.md.
  * The D1 schema is owned by the setup procedure (schema.sql), not by
@@ -31,6 +38,11 @@ import { D1LedgerStore, type D1DatabaseLike } from './d1-ledger-store.js';
 import { KvDoorbell, type KVNamespaceLike } from './kv-doorbell.js';
 import { QueueDelivery, type QueueProducerLike } from './queue.js';
 import { verifySlackSignature } from './slack-signature.js';
+import {
+  postSlackMessage,
+  type SlackPostInput,
+  type SlackPostResult,
+} from './slack-post.js';
 import {
   handleSlackEvent,
   type SlackEventResult,
@@ -72,6 +84,22 @@ export interface EnvBindings {
    * disabled when it is unset or empty.
    */
   DOORBELL_CAPABILITY?: string;
+  /**
+   * Bot User OAuth Token of the hub's Slack app, used only by the
+   * /admin/post route to post as the hub bot. A secret; never logged
+   * or returned. The route is disabled when it is unset.
+   */
+  SLACK_BOT_TOKEN?: string;
+  /**
+   * Unguessable capability for the /admin/post route, sent by the
+   * operator in the x-admin-capability header. Set it with
+   * `wrangler secret put ADMIN_CAPABILITY`; the route is disabled
+   * when it is unset or shorter than MIN_ADMIN_CAPABILITY_LENGTH.
+   * Deliberately separate from DOORBELL_CAPABILITY: the doorbell
+   * capability is read-only and shared with Tier-C readers, while
+   * this one authorizes posting as the hub bot.
+   */
+  ADMIN_CAPABILITY?: string;
   THREAD_LEDGER?: DurableObjectNamespaceLike;
 }
 
@@ -174,10 +202,25 @@ export function threadIdFromBody(rawBody: string): string | null {
  */
 export const MIN_DOORBELL_CAPABILITY_LENGTH = 16;
 
+/** Same fail-closed rule as the doorbell capability. */
+export const MIN_ADMIN_CAPABILITY_LENGTH = 16;
+
+/** Upper bound for one hub-bot post made through /admin/post. */
+export const MAX_BOT_POST_TEXT_LENGTH = 4000;
+
 export interface WorkerDeps extends SlackEventsDeps {
   signingSecret: string;
   /** Capability segment for the doorbell read route (see EnvBindings). */
   doorbellCapability?: string;
+  /** Capability for the /admin/post route (see EnvBindings). */
+  adminCapability?: string;
+  /** Bot token for the /admin/post route (see EnvBindings). */
+  botToken?: string;
+  /** Posting implementation for /admin/post; injectable for tests. */
+  slackPost?: (
+    botToken: string,
+    input: SlackPostInput,
+  ) => Promise<SlackPostResult>;
   nowSeconds?: () => number;
   /** Optional per-thread forwarder (the Durable Object route). */
   forwardToThread?: (
@@ -209,6 +252,60 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
     }
     const flag = await deps.doorbell.peek(c.req.param('threadId'));
     return flag === null ? c.json({ flag: null }) : c.json(flag);
+  });
+
+  app.post('/admin/post', async (c) => {
+    const capability = deps.adminCapability;
+    if (
+      capability === undefined ||
+      capability.length < MIN_ADMIN_CAPABILITY_LENGTH ||
+      c.req.header('x-admin-capability') !== capability ||
+      deps.botToken === undefined ||
+      deps.botToken === ''
+    ) {
+      return c.json({ error: 'not found' }, 404);
+    }
+    let parsed: unknown;
+    try {
+      parsed = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid body' }, 400);
+    }
+    const body = parsed as {
+      channel?: unknown;
+      text?: unknown;
+      thread_ts?: unknown;
+    };
+    if (typeof body.channel !== 'string' || body.channel === '') {
+      return c.json({ error: 'invalid body' }, 400);
+    }
+    if (
+      deps.allowedChannelIds === undefined ||
+      !deps.allowedChannelIds.includes(body.channel)
+    ) {
+      return c.json({ error: 'channel not allowed' }, 400);
+    }
+    if (
+      typeof body.text !== 'string' ||
+      body.text === '' ||
+      body.text.length > MAX_BOT_POST_TEXT_LENGTH
+    ) {
+      return c.json({ error: 'invalid text' }, 400);
+    }
+    if (body.thread_ts !== undefined && typeof body.thread_ts !== 'string') {
+      return c.json({ error: 'invalid body' }, 400);
+    }
+    const post = deps.slackPost ?? postSlackMessage;
+    const result = await post(deps.botToken, {
+      channel: body.channel,
+      text: body.text,
+      ...(body.thread_ts === undefined
+        ? {}
+        : { threadTs: body.thread_ts as string }),
+    });
+    return result.ok
+      ? c.json({ ok: true, ts: result.ts })
+      : c.json({ ok: false, error: result.error }, 502);
   });
 
   app.post('/slack/events', async (c) => {
@@ -261,6 +358,12 @@ export function createAppFromEnv(env: EnvBindings): Hono {
     env.DOORBELL_CAPABILITY === ''
       ? {}
       : { doorbellCapability: env.DOORBELL_CAPABILITY }),
+    ...(env.ADMIN_CAPABILITY === undefined || env.ADMIN_CAPABILITY === ''
+      ? {}
+      : { adminCapability: env.ADMIN_CAPABILITY }),
+    ...(env.SLACK_BOT_TOKEN === undefined || env.SLACK_BOT_TOKEN === ''
+      ? {}
+      : { botToken: env.SLACK_BOT_TOKEN }),
     ...(forwardToThread === undefined ? {} : { forwardToThread }),
   });
 }

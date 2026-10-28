@@ -68,12 +68,23 @@ setup itself is part of the live-integration step, not this provider).
    ```sh
    npx wrangler secret put SLACK_SIGNING_SECRET
    npx wrangler secret put DOORBELL_CAPABILITY
+   npx wrangler secret put SLACK_BOT_TOKEN
+   npx wrangler secret put ADMIN_CAPABILITY
    ```
 
    `DOORBELL_CAPABILITY` is a long random string you generate (for
    example `openssl rand -hex 24`). It enables the doorbell read route
    below; without it — or with a value shorter than 16 characters —
    the route is disabled.
+
+   `SLACK_BOT_TOKEN` (the hub app's Bot User OAuth Token) and
+   `ADMIN_CAPABILITY` (another long random string you generate)
+   together enable the operator bot-post route below; without either
+   — or with a capability shorter than 16 characters — the route is
+   disabled. Keep the two capabilities separate: the doorbell
+   capability is read-only and shared with Tier-C readers, while the
+   admin capability authorizes posting as the hub bot and must stay
+   with the operator.
 
 7. Deploy:
 
@@ -114,6 +125,19 @@ setup itself is part of the live-integration step, not this provider).
   capability URL as a credential for the reader's local configuration
   only: never commit it, and rotate it by changing the secret if it
   leaks.
+- **Operator bot posts.** The operator can make the hub bot post with
+  `POST /admin/post`, sending the admin capability in the
+  `x-admin-capability` header and a JSON body
+  `{channel, text, thread_ts?}`. The route answers 404 — the same as
+  an unknown route — when the capability is missing or wrong, or when
+  either secret is unconfigured. Posts are limited to the allowlisted
+  channels (`ALLOWED_CHANNEL_IDS_JSON`) and to 4,000 characters; a
+  Slack-side failure answers 502 with Slack's error code. A successful
+  post returns `{ok: true, ts}` and comes back through the events
+  ingress like any other bot post, so it is recorded in the ledger.
+  This route is the operator's mouthpiece for the hub bot
+  (announcements, interop tests such as V-1 case B); it is not the
+  delivery consumer for queued jobs.
 - **Addressing reach.** The ingress supplies Slack mentions and thread
   continuation. Role and broadcast addressing are not parsed here —
   structured marker parsing (M4) owns them. Bot-origin posts are
