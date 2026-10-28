@@ -241,6 +241,67 @@ describe('worker app (doorbell read route)', () => {
     expect(res.status).toBe(404);
   });
 
+  it('serves the flag through a per-participant capability', async () => {
+    const CAP2 = 'mugi-capability-0123456789abcdef';
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'agent:mugi': CAP2 });
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+
+    const ok = await app.request(doorbellUrl(CAP2, THREAD));
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({
+      eventId: 'Ev1',
+      ts: '2026-10-27T00:00:00.000Z',
+    });
+
+    // The shared capability is not configured in this deployment.
+    const shared = await app.request(doorbellUrl(CAP, THREAD));
+    expect(shared.status).toBe(404);
+    expect(await shared.json()).toEqual({ error: 'not found' });
+  });
+
+  it('accepts the shared and per-participant capabilities together', async () => {
+    const CAP2 = 'mugi-capability-0123456789abcdef';
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'agent:mugi': CAP2 });
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+
+    expect((await app.request(doorbellUrl(CAP, THREAD))).status).toBe(200);
+    expect((await app.request(doorbellUrl(CAP2, THREAD))).status).toBe(200);
+    const wrong = await app.request(doorbellUrl('nope', THREAD));
+    expect(wrong.status).toBe(404);
+    expect(await wrong.json()).toEqual({ error: 'not found' });
+  });
+
+  it('rejects malformed per-participant capability configuration at startup', () => {
+    const cases: string[] = [
+      'not json',
+      '[1,2]',
+      JSON.stringify({ 'agent:mugi': 'short' }),
+      JSON.stringify({ 'agent:mugi': 42 }),
+      JSON.stringify({ 'agent:a': CAP, 'agent:b': CAP }),
+    ];
+    for (const raw of cases) {
+      const { env } = makeEnv(false);
+      env.DOORBELL_CAPABILITIES_JSON = raw;
+      expect(() => createAppFromEnv(env)).toThrow();
+    }
+    // A per-participant value duplicating the shared capability too.
+    const { env } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'agent:mugi': CAP });
+    expect(() => createAppFromEnv(env)).toThrow();
+  });
+
   it('answers unknown routes with the same 404 body as a wrong capability', async () => {
     const { env } = makeEnv(false);
     env.DOORBELL_CAPABILITY = CAP;

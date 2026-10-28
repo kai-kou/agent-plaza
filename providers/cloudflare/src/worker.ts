@@ -6,7 +6,10 @@
  * - GET  /doorbell/:capability/:threadId
  *                       the doorbell read route for Tier-C readers. The
  *                       capability is an unguessable path segment set as
- *                       a secret (DOORBELL_CAPABILITY); the route is
+ *                       a secret: either the shared DOORBELL_CAPABILITY
+ *                       or a per-participant value from
+ *                       DOORBELL_CAPABILITIES_JSON (issued per reader,
+ *                       SEC-2); the route is
  *                       disabled when it is not configured or is shorter
  *                       than MIN_DOORBELL_CAPABILITY_LENGTH. It returns
  *                       only the flag ({eventId, ts}) or {flag: null} —
@@ -84,6 +87,13 @@ export interface EnvBindings {
    * disabled when it is unset or empty.
    */
   DOORBELL_CAPABILITY?: string;
+  /**
+   * Per-participant doorbell capabilities as a JSON object mapping
+   * participant id to capability, issued per reader (SEC-2). A secret
+   * like DOORBELL_CAPABILITY, which remains as the shared capability;
+   * malformed entries fail startup (see resolveDoorbellCapabilities).
+   */
+  DOORBELL_CAPABILITIES_JSON?: string;
   /**
    * Bot User OAuth Token of the hub's Slack app, used only by the
    * /admin/post route to post as the hub bot. A secret; never logged
@@ -245,6 +255,69 @@ export function threadIdFromBody(rawBody: string): string | null {
  */
 export const MIN_DOORBELL_CAPABILITY_LENGTH = 16;
 
+/**
+ * Resolve the effective set of doorbell capabilities from the two
+ * configuration sources: the shared DOORBELL_CAPABILITY and the
+ * per-participant DOORBELL_CAPABILITIES_JSON map (SEC-2: capabilities
+ * are issued per target). The shared value keeps the legacy semantics
+ * (unset, empty, or shorter than MIN means not configured). The map
+ * is operator-maintained configuration, so malformed entries — bad
+ * JSON, a non-object, an empty participant id, a non-string or
+ * too-short value, or a value duplicating another capability —
+ * throw instead of silently weakening the route (fail-closed).
+ */
+export function resolveDoorbellCapabilities(
+  shared: string | undefined,
+  perParticipantJson: string | undefined,
+): Set<string> {
+  const capabilities = new Set<string>();
+  if (
+    shared !== undefined &&
+    shared.length >= MIN_DOORBELL_CAPABILITY_LENGTH
+  ) {
+    capabilities.add(shared);
+  }
+  if (perParticipantJson !== undefined && perParticipantJson !== '') {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(perParticipantJson);
+    } catch {
+      throw new Error('DOORBELL_CAPABILITIES_JSON must be valid JSON');
+    }
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error(
+        'DOORBELL_CAPABILITIES_JSON must be a JSON object mapping participant id to capability',
+      );
+    }
+    for (const [participantId, value] of Object.entries(parsed)) {
+      if (participantId === '') {
+        throw new Error(
+          'DOORBELL_CAPABILITIES_JSON has an empty participant id',
+        );
+      }
+      if (
+        typeof value !== 'string' ||
+        value.length < MIN_DOORBELL_CAPABILITY_LENGTH
+      ) {
+        throw new Error(
+          `DOORBELL_CAPABILITIES_JSON capability for ${participantId} must be a string of at least ${MIN_DOORBELL_CAPABILITY_LENGTH} characters`,
+        );
+      }
+      if (capabilities.has(value)) {
+        throw new Error(
+          'DOORBELL_CAPABILITIES_JSON capability values must be unique and differ from DOORBELL_CAPABILITY',
+        );
+      }
+      capabilities.add(value);
+    }
+  }
+  return capabilities;
+}
+
 /** Same fail-closed rule as the doorbell capability. */
 export const MIN_ADMIN_CAPABILITY_LENGTH = 16;
 
@@ -253,8 +326,8 @@ export const MAX_BOT_POST_TEXT_LENGTH = 4000;
 
 export interface WorkerDeps extends SlackEventsDeps {
   signingSecret: string;
-  /** Capability segment for the doorbell read route (see EnvBindings). */
-  doorbellCapability?: string;
+  /** Capability segments accepted by the doorbell read route (see EnvBindings). */
+  doorbellCapabilities?: ReadonlySet<string>;
   /** Capability for the /admin/post route (see EnvBindings). */
   adminCapability?: string;
   /** Bot token for the /admin/post route (see EnvBindings). */
@@ -277,6 +350,16 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
   const sequencer = deps.sequencer ?? new ThreadSequencer();
   const nowSeconds =
     deps.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
+  // The minimum-length rule holds for any deps source, not only for
+  // the env wiring: a shorter value never takes effect (fail-closed).
+  const doorbellCapabilities =
+    deps.doorbellCapabilities === undefined
+      ? undefined
+      : new Set(
+          [...deps.doorbellCapabilities].filter(
+            (v) => v.length >= MIN_DOORBELL_CAPABILITY_LENGTH,
+          ),
+        );
 
   app.get('/healthz', (c) => c.text('ok'));
 
@@ -285,11 +368,9 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
   app.notFound((c) => c.json({ error: 'not found' }, 404));
 
   app.get('/doorbell/:capability/:threadId', async (c) => {
-    const capability = deps.doorbellCapability;
     if (
-      capability === undefined ||
-      capability.length < MIN_DOORBELL_CAPABILITY_LENGTH ||
-      c.req.param('capability') !== capability
+      doorbellCapabilities === undefined ||
+      !doorbellCapabilities.has(c.req.param('capability'))
     ) {
       return c.json({ error: 'not found' }, 404);
     }
@@ -377,6 +458,10 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
 
 export function createAppFromEnv(env: EnvBindings): Hono {
   const base = depsFromEnv(env);
+  const doorbellCapabilities = resolveDoorbellCapabilities(
+    env.DOORBELL_CAPABILITY,
+    env.DOORBELL_CAPABILITIES_JSON,
+  );
   const forwardToThread =
     env.THREAD_LEDGER === undefined
       ? undefined
@@ -397,10 +482,7 @@ export function createAppFromEnv(env: EnvBindings): Hono {
   return createWorkerApp({
     ...base,
     signingSecret: env.SLACK_SIGNING_SECRET,
-    ...(env.DOORBELL_CAPABILITY === undefined ||
-    env.DOORBELL_CAPABILITY === ''
-      ? {}
-      : { doorbellCapability: env.DOORBELL_CAPABILITY }),
+    ...(doorbellCapabilities.size === 0 ? {} : { doorbellCapabilities }),
     ...(env.ADMIN_CAPABILITY === undefined || env.ADMIN_CAPABILITY === ''
       ? {}
       : { adminCapability: env.ADMIN_CAPABILITY }),
