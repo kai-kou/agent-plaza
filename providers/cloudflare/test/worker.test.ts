@@ -302,6 +302,121 @@ describe('worker app (doorbell read route)', () => {
     expect(() => createAppFromEnv(env)).toThrow();
   });
 
+  function doorbellHeaderUrl(thread: string): string {
+    return `http://hub.test/doorbell/${encodeURIComponent(thread)}`;
+  }
+
+  it('serves the flag through the Authorization Bearer header', async () => {
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+
+    const ok = await app.request(doorbellHeaderUrl(THREAD), {
+      headers: { authorization: `Bearer ${CAP}` },
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({
+      eventId: 'Ev1',
+      ts: '2026-10-27T00:00:00.000Z',
+    });
+
+    const absent = await app.request(doorbellHeaderUrl('C1:9999999999.999999'), {
+      headers: { authorization: `Bearer ${CAP}` },
+    });
+    expect(absent.status).toBe(200);
+    expect(await absent.json()).toEqual({ flag: null });
+  });
+
+  it('serves the flag through the X-Capability header', async () => {
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+
+    const ok = await app.request(doorbellHeaderUrl(THREAD), {
+      headers: { 'x-capability': CAP },
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({
+      eventId: 'Ev1',
+      ts: '2026-10-27T00:00:00.000Z',
+    });
+  });
+
+  it('serves the flag through a per-participant capability in a header', async () => {
+    const CAP2 = 'mugi-capability-0123456789abcdef';
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'agent:mugi': CAP2 });
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+
+    const ok = await app.request(doorbellHeaderUrl(THREAD), {
+      headers: { authorization: `Bearer ${CAP2}` },
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({
+      eventId: 'Ev1',
+      ts: '2026-10-27T00:00:00.000Z',
+    });
+  });
+
+  it('rejects the header form with the same indistinguishable 404', async () => {
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+    const url = doorbellHeaderUrl(THREAD);
+
+    const attempts: Record<string, string>[] = [
+      { authorization: 'Bearer nope-capability-value' },
+      { 'x-capability': 'nope-capability-value' },
+      { authorization: CAP },
+      { authorization: `Basic ${CAP}` },
+      {},
+      // Both headers present but disagreeing, one of them valid.
+      { authorization: `Bearer ${CAP}`, 'x-capability': 'nope-capability-value' },
+      { authorization: 'Bearer nope-capability-value', 'x-capability': CAP },
+    ];
+    for (const headers of attempts) {
+      const res = await app.request(url, { headers });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'not found' });
+    }
+
+    // Both headers present and agreeing on the valid capability.
+    const ok = await app.request(url, {
+      headers: { authorization: `Bearer ${CAP}`, 'x-capability': CAP },
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  it('keeps the header form disabled when no capability is configured', async () => {
+    const { env, kv } = makeEnv(false);
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+    const res = await app.request(doorbellHeaderUrl(THREAD), {
+      headers: { authorization: `Bearer ${CAP}` },
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'not found' });
+  });
+
   it('answers unknown routes with the same 404 body as a wrong capability', async () => {
     const { env } = makeEnv(false);
     env.DOORBELL_CAPABILITY = CAP;
