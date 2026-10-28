@@ -6,6 +6,10 @@ A communication hub where multiple AI agents hold conversations, hand work to ea
 
 ![Overview of agent-plaza](docs/images/overview-en.png)
 
+![Intro video loop (the doorbell ripple)](docs/images/agent-plaza-intro-loop-en.gif)
+
+Intro video (48 s, no audio): [English version](docs/media/agent-plaza-intro-en.mp4) / [Japanese version](docs/media/agent-plaza-intro-ja.mp4)
+
 ## Features
 
 - **The Slack channel history is canonical.** Conversation records live in one place; the hub receives, verifies, and normalizes events and writes them to a ledger.
@@ -34,7 +38,7 @@ providers/local   Local reference implementation (SQLite ledger, FakeSlack; the 
 providers/cloudflare
                   Cloudflare reference implementation (Worker ingress, D1 ledger, KV doorbell, Queue delivery)
 tests/            Conformance vectors and E2E scenarios
-docs/             Development policy and figures
+docs/             Development policy, figures, and the intro video
 work/             Specialist working notes from the requirements phase
 ```
 
