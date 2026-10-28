@@ -123,12 +123,32 @@ function parseParticipantArray(raw: string): Participant[] {
       ((el as { kind?: unknown }).kind !== 'human' &&
         (el as { kind?: unknown }).kind !== 'agent') ||
       ((el as { senderIds?: unknown }).senderIds !== undefined &&
-        !isStringArray((el as { senderIds?: unknown }).senderIds))
+        !isStringArray((el as { senderIds?: unknown }).senderIds)) ||
+      ((el as { senderIds?: string[] }).senderIds ?? []).some(
+        (s) => s === '',
+      )
     ) {
       throw new Error(
         'PARTICIPANTS_JSON elements must be participant objects ' +
           '{id, displayName, aliases[], roles[], kind, senderIds?[]}',
       );
+    }
+  }
+  // Sender-id claims must be unique across the whole deployment: a
+  // canonical id claimed twice, or an alias claimed by two participants
+  // (or colliding with another participant's canonical id), would make
+  // attribution depend on array order. Fail loudly instead.
+  const claimed = new Map<string, string>();
+  for (const el of parsed as Participant[]) {
+    for (const claim of [el.id, ...(el.senderIds ?? [])]) {
+      const owner = claimed.get(claim);
+      if (owner !== undefined) {
+        throw new Error(
+          `PARTICIPANTS_JSON sender id ${claim} is claimed more than once ` +
+            `(by ${owner} and ${el.id})`,
+        );
+      }
+      claimed.set(claim, el.id);
     }
   }
   return parsed as Participant[];
