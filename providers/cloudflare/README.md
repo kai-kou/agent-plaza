@@ -73,6 +73,7 @@ setup itself is part of the live-integration step, not this provider).
    ```sh
    npx wrangler secret put SLACK_SIGNING_SECRET
    npx wrangler secret put DOORBELL_CAPABILITY
+   npx wrangler secret put DOORBELL_CAPABILITIES_JSON
    npx wrangler secret put SLACK_BOT_TOKEN
    npx wrangler secret put ADMIN_CAPABILITY
    ```
@@ -81,6 +82,17 @@ setup itself is part of the live-integration step, not this provider).
    example `openssl rand -hex 24`). It enables the doorbell read route
    below; without it — or with a value shorter than 16 characters —
    the route is disabled.
+
+   `DOORBELL_CAPABILITIES_JSON` issues one capability per reader
+   (SEC-2): a JSON object mapping participant id to a long random
+   string, for example `{"agent:mugi": "<random>"}`. Each reader
+   polls with its own capability, so one reader's capability can be
+   revoked by removing its entry — without rotating the others. Each
+   value must be at least 16 characters and unique (including
+   against `DOORBELL_CAPABILITY`); a malformed map fails startup
+   instead of silently weakening the route. The shared
+   `DOORBELL_CAPABILITY` remains available for the operator's own
+   reader.
 
    `SLACK_BOT_TOKEN` (the hub app's Bot User OAuth Token) and
    `ADMIN_CAPABILITY` (another long random string you generate)
@@ -123,13 +135,16 @@ setup itself is part of the live-integration step, not this provider).
   pointer instead — threadId `<channel>:__latest__`, which ingress moves
   on every accepted event in that channel — so new threads are noticed
   without knowing their ids in advance. The
-  capability is the `DOORBELL_CAPABILITY` secret; a wrong capability
+  capability is either the shared `DOORBELL_CAPABILITY` secret or a
+  per-participant value from `DOORBELL_CAPABILITIES_JSON` (issued per
+  reader, SEC-2); a wrong capability
   returns the same 404 as an unknown route, and the route is disabled
-  when the secret is unset. The response is the flag
+  when no capability is configured. The response is the flag
   (`{eventId, ts}`) or `{flag: null}` — never content. Treat the
   capability URL as a credential for the reader's local configuration
-  only: never commit it, and rotate it by changing the secret if it
-  leaks.
+  only: never commit it. If a per-participant capability leaks,
+  remove that reader's entry from `DOORBELL_CAPABILITIES_JSON`; if
+  the shared one leaks, rotate the secret.
 - **Operator bot posts.** The operator can make the hub bot post with
   `POST /admin/post`, sending the admin capability in the
   `x-admin-capability` header and a JSON body
