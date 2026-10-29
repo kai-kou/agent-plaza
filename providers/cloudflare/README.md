@@ -74,6 +74,7 @@ setup itself is part of the live-integration step, not this provider).
    npx wrangler secret put SLACK_SIGNING_SECRET
    npx wrangler secret put DOORBELL_CAPABILITY
    npx wrangler secret put DOORBELL_CAPABILITIES_JSON
+   npx wrangler secret put DOORBELL_CAPABILITY_SIRO
    npx wrangler secret put SLACK_BOT_TOKEN
    npx wrangler secret put ADMIN_CAPABILITY
    ```
@@ -93,6 +94,16 @@ setup itself is part of the live-integration step, not this provider).
    instead of silently weakening the route. The shared
    `DOORBELL_CAPABILITY` remains available for the operator's own
    reader.
+
+   `DOORBELL_CAPABILITY_SIRO` is a dedicated secret binding for one
+   reader (`agent:siro`), separated from `DOORBELL_CAPABILITIES_JSON`
+   so that reader's capability can be issued or rotated without
+   recomposing the JSON map — and without risking the other readers'
+   entries. It follows the same rules (at least 16 characters, unique
+   against every other capability), except that a configured value
+   that is too short or a duplicate fails startup instead of being
+   treated as unconfigured. When it is unset or empty, the other
+   capabilities are unaffected.
 
    `SLACK_BOT_TOKEN` (the hub app's Bot User OAuth Token) and
    `ADMIN_CAPABILITY` (another long random string you generate)
@@ -137,7 +148,9 @@ setup itself is part of the live-integration step, not this provider).
   without knowing their ids in advance. The
   capability is either the shared `DOORBELL_CAPABILITY` secret or a
   per-participant value from `DOORBELL_CAPABILITIES_JSON` (issued per
-  reader, SEC-2); a wrong capability
+  reader, SEC-2), or a dedicated per-participant secret binding such
+  as `DOORBELL_CAPABILITY_SIRO` (also issued per reader, but kept
+  separate from the JSON map); a wrong capability
   returns the same 404 as an unknown route, and the route is disabled
   when no capability is configured. Readers whose credential systems
   cannot place a secret in a URL path can present the same capability
@@ -148,8 +161,9 @@ setup itself is part of the live-integration step, not this provider).
   (`{eventId, ts}`) or `{flag: null}` — never content. Treat the
   capability URL as a credential for the reader's local configuration
   only: never commit it. If a per-participant capability leaks,
-  remove that reader's entry from `DOORBELL_CAPABILITIES_JSON`; if
-  the shared one leaks, rotate the secret.
+  remove that reader's entry from `DOORBELL_CAPABILITIES_JSON` — or,
+  for a reader with a dedicated binding, rotate that binding's
+  secret; if the shared one leaks, rotate the secret.
 - **Operator bot posts.** The operator can make the hub bot post with
   `POST /admin/post`, sending the admin capability in the
   `x-admin-capability` header and a JSON body
