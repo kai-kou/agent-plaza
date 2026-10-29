@@ -3,6 +3,7 @@ import { createHmac } from 'node:crypto';
 import {
   ThreadLedgerObject,
   createAppFromEnv,
+  resolveDoorbellCapabilities,
   type D1DatabaseLike,
   type D1PreparedStatementLike,
   type DeliveryJob,
@@ -280,6 +281,130 @@ describe('worker app (doorbell read route)', () => {
     const wrong = await app.request(doorbellUrl('nope', THREAD));
     expect(wrong.status).toBe(404);
     expect(await wrong.json()).toEqual({ error: 'not found' });
+  });
+
+  it('serves the flag through the dedicated siro capability alongside the shared and JSON capabilities', async () => {
+    const CAP2 = 'mugi-capability-0123456789abcdef';
+    const CAP3 = 'siro-capability-0123456789abcdef';
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    // The JSON map intentionally has no agent:siro entry: the
+    // dedicated binding must be effective without recomposing it.
+    env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'agent:mugi': CAP2 });
+    env.DOORBELL_CAPABILITY_SIRO = CAP3;
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+
+    expect((await app.request(doorbellUrl(CAP, THREAD))).status).toBe(200);
+    expect((await app.request(doorbellUrl(CAP2, THREAD))).status).toBe(200);
+    const ok = await app.request(doorbellUrl(CAP3, THREAD));
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({
+      eventId: 'Ev1',
+      ts: '2026-10-27T00:00:00.000Z',
+    });
+    const wrong = await app.request(doorbellUrl('nope', THREAD));
+    expect(wrong.status).toBe(404);
+    expect(await wrong.json()).toEqual({ error: 'not found' });
+  });
+
+  it('serves the flag through the dedicated siro capability in the header forms', async () => {
+    const CAP3 = 'siro-capability-0123456789abcdef';
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY_SIRO = CAP3;
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+
+    const bearer = await app.request(doorbellHeaderUrl(THREAD), {
+      headers: { authorization: `Bearer ${CAP3}` },
+    });
+    expect(bearer.status).toBe(200);
+    expect(await bearer.json()).toEqual({
+      eventId: 'Ev1',
+      ts: '2026-10-27T00:00:00.000Z',
+    });
+
+    const header = await app.request(doorbellHeaderUrl(THREAD), {
+      headers: { 'x-capability': CAP3 },
+    });
+    expect(header.status).toBe(200);
+
+    const wrong = await app.request(doorbellHeaderUrl(THREAD), {
+      headers: { authorization: 'Bearer nope-capability-value' },
+    });
+    expect(wrong.status).toBe(404);
+    expect(await wrong.json()).toEqual({ error: 'not found' });
+  });
+
+  it('rejects a too-short or duplicate dedicated capability at startup', () => {
+    const CAP2 = 'mugi-capability-0123456789abcdef';
+    const cases: string[] = [
+      'short',
+      // Duplicating the shared capability.
+      CAP,
+      // Duplicating a per-participant JSON capability.
+      CAP2,
+    ];
+    for (const dedicated of cases) {
+      const { env } = makeEnv(false);
+      env.DOORBELL_CAPABILITY = CAP;
+      env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'agent:mugi': CAP2 });
+      env.DOORBELL_CAPABILITY_SIRO = dedicated;
+      expect(() => createAppFromEnv(env)).toThrow();
+    }
+  });
+
+  it('leaves the existing capabilities unchanged when the dedicated binding is not configured', async () => {
+    const CAP2 = 'mugi-capability-0123456789abcdef';
+    const CAP3 = 'siro-capability-0123456789abcdef';
+    for (const mode of ['unset', 'empty'] as const) {
+      const { env, kv } = makeEnv(false);
+      env.DOORBELL_CAPABILITY = CAP;
+      env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'agent:mugi': CAP2 });
+      if (mode === 'empty') {
+        env.DOORBELL_CAPABILITY_SIRO = '';
+      }
+      kv.data.set(
+        `doorbell:${THREAD}`,
+        JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+      );
+      const app = createAppFromEnv(env);
+      expect((await app.request(doorbellUrl(CAP, THREAD))).status).toBe(200);
+      expect((await app.request(doorbellUrl(CAP2, THREAD))).status).toBe(200);
+      expect((await app.request(doorbellUrl(CAP3, THREAD))).status).toBe(404);
+    }
+  });
+
+  it('resolves dedicated capabilities generically and rejects duplicates among them', () => {
+    const CAP2 = 'mugi-capability-0123456789abcdef';
+    const CAP3 = 'siro-capability-0123456789abcdef';
+    const resolved = resolveDoorbellCapabilities(
+      CAP,
+      JSON.stringify({ 'agent:mugi': CAP2 }),
+      { 'agent:siro': CAP3 },
+    );
+    expect(resolved).toEqual(new Set([CAP, CAP2, CAP3]));
+    // Two dedicated values duplicating each other.
+    expect(() =>
+      resolveDoorbellCapabilities(CAP, undefined, {
+        'agent:siro': CAP3,
+        'agent:other': CAP3,
+      }),
+    ).toThrow();
+    // An empty participant id in the dedicated map.
+    expect(() =>
+      resolveDoorbellCapabilities(CAP, undefined, { '': CAP3 }),
+    ).toThrow();
+    // A dedicated value shorter than the minimum length.
+    expect(() =>
+      resolveDoorbellCapabilities(CAP, undefined, { 'agent:siro': 'short' }),
+    ).toThrow();
   });
 
   it('rejects malformed per-participant capability configuration at startup', () => {

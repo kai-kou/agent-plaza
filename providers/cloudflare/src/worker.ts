@@ -9,7 +9,9 @@
  *                       a secret: either the shared DOORBELL_CAPABILITY
  *                       or a per-participant value from
  *                       DOORBELL_CAPABILITIES_JSON (issued per reader,
- *                       SEC-2); the route is
+ *                       SEC-2), or a dedicated per-participant secret
+ *                       binding such as DOORBELL_CAPABILITY_SIRO
+ *                       (separated from the JSON map); the route is
  *                       disabled when it is not configured or is shorter
  *                       than MIN_DOORBELL_CAPABILITY_LENGTH. It returns
  *                       only the flag ({eventId, ts}) or {flag: null} —
@@ -104,6 +106,14 @@ export interface EnvBindings {
    * malformed entries fail startup (see resolveDoorbellCapabilities).
    */
   DOORBELL_CAPABILITIES_JSON?: string;
+  /**
+   * Dedicated doorbell capability for agent:siro, kept in a separate
+   * secret binding instead of DOORBELL_CAPABILITIES_JSON so it can be
+   * issued or rotated without recomposing the JSON map. A secret like
+   * DOORBELL_CAPABILITY; a configured-but-too-short or duplicate value
+   * fails startup (see resolveDoorbellCapabilities).
+   */
+  DOORBELL_CAPABILITY_SIRO?: string;
   /**
    * Bot User OAuth Token of the hub's Slack app, used only by the
    * /admin/post route to post as the hub bot. A secret; never logged
@@ -266,19 +276,27 @@ export function threadIdFromBody(rawBody: string): string | null {
 export const MIN_DOORBELL_CAPABILITY_LENGTH = 16;
 
 /**
- * Resolve the effective set of doorbell capabilities from the two
- * configuration sources: the shared DOORBELL_CAPABILITY and the
- * per-participant DOORBELL_CAPABILITIES_JSON map (SEC-2: capabilities
- * are issued per target). The shared value keeps the legacy semantics
- * (unset, empty, or shorter than MIN means not configured). The map
- * is operator-maintained configuration, so malformed entries — bad
+ * Resolve the effective set of doorbell capabilities from the
+ * configuration sources: the shared DOORBELL_CAPABILITY, the
+ * per-participant DOORBELL_CAPABILITIES_JSON map, and dedicated
+ * per-participant secret bindings passed as a participant id to
+ * value map (SEC-2: capabilities are issued per target). A dedicated
+ * binding is kept separate from the JSON map so that reader's
+ * capability can be issued or rotated without recomposing the map.
+ * The shared value keeps the legacy semantics (unset, empty, or
+ * shorter than MIN means not configured). The map is
+ * operator-maintained configuration, so malformed entries — bad
  * JSON, a non-object, an empty participant id, a non-string or
  * too-short value, or a value duplicating another capability —
  * throw instead of silently weakening the route (fail-closed).
+ * Dedicated values follow the same fail-closed rule: unset or empty
+ * means not configured, but a configured value that is too short or
+ * duplicates another capability throws.
  */
 export function resolveDoorbellCapabilities(
   shared: string | undefined,
   perParticipantJson: string | undefined,
+  dedicated: Readonly<Record<string, string | undefined>> = {},
 ): Set<string> {
   const capabilities = new Set<string>();
   if (
@@ -324,6 +342,25 @@ export function resolveDoorbellCapabilities(
       }
       capabilities.add(value);
     }
+  }
+  for (const [participantId, value] of Object.entries(dedicated)) {
+    if (participantId === '') {
+      throw new Error('Dedicated doorbell capability has an empty participant id');
+    }
+    if (value === undefined || value === '') {
+      continue;
+    }
+    if (value.length < MIN_DOORBELL_CAPABILITY_LENGTH) {
+      throw new Error(
+        `Dedicated doorbell capability for ${participantId} must be at least ${MIN_DOORBELL_CAPABILITY_LENGTH} characters`,
+      );
+    }
+    if (capabilities.has(value)) {
+      throw new Error(
+        'Dedicated doorbell capability values must be unique and differ from DOORBELL_CAPABILITY and DOORBELL_CAPABILITIES_JSON',
+      );
+    }
+    capabilities.add(value);
   }
   return capabilities;
 }
@@ -526,6 +563,7 @@ export function createAppFromEnv(env: EnvBindings): Hono {
   const doorbellCapabilities = resolveDoorbellCapabilities(
     env.DOORBELL_CAPABILITY,
     env.DOORBELL_CAPABILITIES_JSON,
+    { 'agent:siro': env.DOORBELL_CAPABILITY_SIRO },
   );
   const forwardToThread =
     env.THREAD_LEDGER === undefined
