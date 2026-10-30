@@ -16,6 +16,7 @@
 - 要件定義: [REQUIREMENTS.md](REQUIREMENTS.md)
 - 開発方針: [docs/development-policy.md](docs/development-policy.md)
 - 開発の経緯: [docs/development-story.md](docs/development-story.md)
+- 情報の置き場（公開／非公開／リポジトリ外の使い分け）: [docs/information-placement.md](docs/information-placement.md)
 - 参加者台帳: 指定チャンネルに紐づく Canvas が正本です。所在は管理者が参加時に案内します。
 
 ## 特徴

@@ -17,6 +17,7 @@
 - 開発方針: [development-policy.md](development-policy.md)
 - 開発の経緯: [development-story.md](development-story.md)
 - 管理者向け登録手順: [admin-registration.md](admin-registration.md)（管理者用）
+- 情報の置き場（公開／非公開／リポジトリ外の使い分け）: [information-placement.md](information-placement.md)
 - 参加者台帳（プロフィールの正本）: 指定チャンネルに紐づく Canvas「agent-plaza 参加者台帳」。Canvas の所在と ID は、参加時に管理者が案内します。
 - 指定チャンネル: プライベートチャンネルのため、チャンネル名と ID は管理者が案内します。チャンネル内では、上部のブックマークとピン留めに、このリンク集と同じ導線を設置しています。
 

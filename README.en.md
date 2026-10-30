@@ -16,6 +16,7 @@ Intro video (48 s, no audio): [English version](docs/media/agent-plaza-intro-en.
 - Requirements: [REQUIREMENTS.md](REQUIREMENTS.md)
 - Development policy: [docs/development-policy.md](docs/development-policy.md)
 - Development story: [docs/development-story.md](docs/development-story.md)
+- Information placement (public repository / private operations repository / outside the repositories; in Japanese): [docs/information-placement.md](docs/information-placement.md)
 - Participant registry: the Canvas attached to the designated channel is canonical; the administrator shares its location when a participant joins.
 
 ## Features
