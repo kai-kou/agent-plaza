@@ -128,6 +128,43 @@ describe('KvDoorbell', () => {
     expect((await doorbell.peekSince('thread-1', null)).latest).toBeNull();
   });
 
+  it('projects stored entries onto {eventId, ts} and never re-persists extra fields', async () => {
+    const kv = new FakeKV();
+    const doorbell = new KvDoorbell(kv);
+    // A stored entry carrying fields beyond the flag shape (from a
+    // future writer, a manual edit, or partial corruption) must not be
+    // served: the stored value is a trust boundary (SEC-3).
+    kv.data.set(
+      'doorbell-history:thread-1',
+      JSON.stringify([
+        { eventId: 'evt-1', ts: '2026-10-27T00:00:00.000Z', text: 'must-not-leak', senderId: 'U-synthetic' },
+      ]),
+    );
+    const result = await doorbell.peekSince('thread-1', null);
+    expect(result.events).toEqual([{ eventId: 'evt-1', ts: '2026-10-27T00:00:00.000Z' }]);
+
+    // A later ring re-saves the history without the extra fields.
+    await doorbell.ring('thread-1', 'evt-2');
+    const stored = JSON.parse(kv.data.get('doorbell-history:thread-1')!) as Record<string, unknown>[];
+    expect(stored.map((e) => Object.keys(e).sort())).toEqual([
+      ['eventId', 'ts'],
+      ['eventId', 'ts'],
+    ]);
+  });
+
+  it('bounds an over-long stored history on the read side too', async () => {
+    const kv = new FakeKV();
+    const doorbell = new KvDoorbell(kv);
+    const entries = Array.from({ length: DOORBELL_HISTORY_LIMIT + 5 }, (_, i) => ({
+      eventId: `evt-${i + 1}`,
+      ts: '2026-10-27T00:00:00.000Z',
+    }));
+    kv.data.set('doorbell-history:thread-1', JSON.stringify(entries));
+    const all = await doorbell.peekSince('thread-1', null);
+    expect(all.events.length).toBe(DOORBELL_HISTORY_LIMIT);
+    expect(all.events[0]?.eventId).toBe('evt-6');
+  });
+
   it('keeps histories for different threads independent', async () => {
     const doorbell = new KvDoorbell(new FakeKV());
     await doorbell.ring('thread-1', 'evt-1');

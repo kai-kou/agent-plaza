@@ -162,13 +162,22 @@ export class KvDoorbell {
     try {
       const parsed: unknown = JSON.parse(raw);
       if (!Array.isArray(parsed)) return [];
-      return parsed.filter(
-        (entry): entry is DoorbellFlag =>
-          typeof entry === 'object' &&
-          entry !== null &&
-          typeof (entry as DoorbellFlag).eventId === 'string' &&
-          typeof (entry as DoorbellFlag).ts === 'string',
-      );
+      // The stored value is a trust boundary: project each entry onto a
+      // fresh {eventId, ts} object so extra fields a writer (or a manual
+      // edit, or partial corruption) put there are never served or
+      // re-persisted, exactly as peek() does for the flag. The read side
+      // also re-applies the retention limit, so an over-long stored
+      // value stays bounded (fail-closed).
+      return parsed
+        .filter(
+          (entry): entry is DoorbellFlag =>
+            typeof entry === 'object' &&
+            entry !== null &&
+            typeof (entry as DoorbellFlag).eventId === 'string' &&
+            typeof (entry as DoorbellFlag).ts === 'string',
+        )
+        .map((entry) => ({ eventId: entry.eventId, ts: entry.ts }))
+        .slice(-DOORBELL_HISTORY_LIMIT);
     } catch {
       return [];
     }

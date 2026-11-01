@@ -282,6 +282,15 @@ describe('worker app (doorbell read route)', () => {
     const headerBody = (await headerRes.json()) as { outOfRange: boolean; events: unknown[] };
     expect(headerBody.outOfRange).toBe(false);
     expect(headerBody.events).toEqual([]);
+
+    // The header form applies the same capability rules to the since
+    // form: a wrong capability is indistinguishable from an unknown route.
+    const wrongHeader = await app.request(
+      `http://hub.test/doorbell/${encodeURIComponent(THREAD)}?since=Ev1`,
+      { headers: { authorization: 'Bearer nope' } },
+    );
+    expect(wrongHeader.status).toBe(404);
+    expect(await wrongHeader.json()).toEqual({ error: 'not found' });
   });
 
   it('treats a too-short capability as not configured', async () => {
