@@ -114,7 +114,9 @@ setup itself is part of the live-integration step, not this provider).
    `{"agent:mugi": "<random>"}`. An exchange capability authorizes
    reads and writes, so each value must be at least 32 characters and
    unique; a malformed map fails startup instead of silently
-   weakening the routes. Each capability is scoped to the bucket
+   weakening the routes, as does a map where two participant ids
+   derive the same prefix (for example `agent:mugi` and `mugi`).
+   Each capability is scoped to the bucket
    prefix derived from its participant id, `exchange/<short-id>/`
    (the id after the `agent:` prefix), and the routes stay disabled
    until the `EXCHANGE_BUCKET` R2 binding in `wrangler.toml` is also
@@ -216,8 +218,13 @@ setup itself is part of the live-integration step, not this provider).
   `/exchange/<key suffix>` with an `Authorization: Bearer
   <capability>` or `X-Capability: <capability>` header (when both
   headers are present they must agree) — for readers whose
-  credential systems cannot place a secret in a URL path. There is
-  deliberately no listing and no delete. The exchange carries file
+  credential systems cannot place a secret in a URL path. When a
+  request could match either form, the path form governs: if the
+  first path segment is a configured capability, that segment is the
+  capability and any capability headers are ignored; otherwise the
+  header capability governs and the entire remainder of the path is
+  the key suffix. The both-headers-must-agree rule applies only in
+  the header form. There is deliberately no listing and no delete. The exchange carries file
   bytes only; the ledger remains the source of truth for messages.
   Treat the capability as a credential for the participant's local
   configuration only: never commit it. If one leaks, remove that

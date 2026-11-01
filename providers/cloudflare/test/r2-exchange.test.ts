@@ -7,6 +7,7 @@ import {
   createWorkerApp,
   isValidExchangeKeySuffix,
   resolveExchangeCapabilities,
+  MAX_EXCHANGE_OBJECT_SIZE,
   type D1DatabaseLike,
   type D1PreparedStatementLike,
   type DeliveryJob,
@@ -285,6 +286,73 @@ describe('worker app (exchange routes, path form)', () => {
     expect(bucket.objects.size).toBe(0);
   });
 
+  it('rejects a GET whose suffix has a dot segment', async () => {
+    const { app } = makeApp();
+    const get = await app.request(
+      `http://hub.test/exchange/${CAP_MARO}/..%2Fsecret.txt`,
+    );
+    expect(get.status).toBe(400);
+    expect(await get.json()).toEqual({ error: 'invalid key' });
+  });
+
+  it('answers a wrong capability exactly like an unknown route', async () => {
+    const { app } = makeApp();
+    const unknown = await app.request('http://hub.test/no-such-route');
+    expect(unknown.status).toBe(404);
+    const wrong = await app.request(
+      exchangeUrl('wrong-capability-value-0123456789abcdef', 'file.bin'),
+    );
+    expect(wrong.status).toBe(404);
+    expect(await wrong.text()).toBe(await unknown.text());
+  });
+
+  it('answers 413 for a chunked PUT over the size cap and stores nothing', async () => {
+    const { app, bucket } = makeApp({ maxObjectSize: 4 });
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(BYTES.slice(0, 3));
+        controller.enqueue(BYTES.slice(3));
+        controller.close();
+      },
+    });
+    // A streamed body arrives chunked, with no Content-Length for
+    // the pre-check to reject: only the post-read cap can stop it.
+    const res = await app.request(exchangeUrl(CAP_MARO, 'big.bin'), {
+      method: 'PUT',
+      body: stream,
+      duplex: 'half',
+    } as RequestInit);
+    expect(res.status).toBe(413);
+    expect(bucket.objects.size).toBe(0);
+  });
+
+  it('serves downloads with hardening headers, the stored etag and the default content type', async () => {
+    const { app } = makeApp();
+    // No explicit content type on the PUT: the stored type defaults
+    // to application/octet-stream.
+    await app.request(exchangeUrl(CAP_MARO, 'file.bin'), {
+      method: 'PUT',
+      body: BYTES.slice(),
+    });
+    const get = await app.request(exchangeUrl(CAP_MARO, 'file.bin'));
+    expect(get.status).toBe(200);
+    expect(get.headers.get('content-type')).toBe(
+      'application/octet-stream',
+    );
+    expect(get.headers.get('etag')).toBe('"fake-etag"');
+    expect(get.headers.get('content-disposition')).toBe('attachment');
+    expect(get.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(get.headers.get('content-security-policy')).toBe('sandbox');
+    const head = await app.request(exchangeUrl(CAP_MARO, 'file.bin'), {
+      method: 'HEAD',
+    });
+    expect(head.status).toBe(200);
+    expect(head.headers.get('etag')).toBe('"fake-etag"');
+    expect(head.headers.get('content-disposition')).toBe('attachment');
+    expect(head.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(head.headers.get('content-security-policy')).toBe('sandbox');
+  });
+
   it('answers 413 for a PUT over the size cap and stores nothing', async () => {
     const { app, bucket } = makeApp({ maxObjectSize: 4 });
     const over = await app.request(exchangeUrl(CAP_MARO, 'big.bin'), {
@@ -355,6 +423,36 @@ describe('worker app (exchange routes, header form)', () => {
       body: BYTES.slice(),
     });
     expect(put.status).toBe(404);
+    const head = await app.request(
+      'http://hub.test/exchange/from-maro.txt',
+      { method: 'HEAD' },
+    );
+    expect(head.status).toBe(404);
+  });
+
+  it('answers the same 404 for a wrong header capability on GET, PUT and HEAD, storing nothing', async () => {
+    const { app, bucket } = makeApp();
+    const headers = {
+      authorization:
+        'Bearer wrong-capability-value-0123456789abcdef',
+    };
+    const get = await app.request('http://hub.test/exchange/file.bin', {
+      headers,
+    });
+    expect(get.status).toBe(404);
+    expect(await get.json()).toEqual({ error: 'not found' });
+    const put = await app.request('http://hub.test/exchange/file.bin', {
+      method: 'PUT',
+      headers,
+      body: BYTES.slice(),
+    });
+    expect(put.status).toBe(404);
+    const head = await app.request('http://hub.test/exchange/file.bin', {
+      method: 'HEAD',
+      headers,
+    });
+    expect(head.status).toBe(404);
+    expect(bucket.objects.size).toBe(0);
   });
 
   it('answers 404 when the two headers disagree', async () => {
@@ -440,6 +538,39 @@ describe('resolveExchangeCapabilities', () => {
       resolveExchangeCapabilities(JSON.stringify({ 'agent:maro': 42 })),
     ).toThrow();
   });
+
+  it('throws when two participant ids derive the same prefix', () => {
+    let thrown: unknown;
+    try {
+      resolveExchangeCapabilities(
+        JSON.stringify({ 'agent:maro': CAP_MARO, maro: CAP_GOMA }),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    // The error names the participant ids, never a capability value.
+    const message = (thrown as Error).message;
+    expect(message).toContain('agent:maro');
+    expect(message).toContain('maro');
+    expect(message).not.toContain(CAP_MARO);
+    expect(message).not.toContain(CAP_GOMA);
+  });
+
+  it('resolves ids with and without the agent: prefix to distinct prefixes', () => {
+    const resolved = resolveExchangeCapabilities(
+      JSON.stringify({ 'agent:maro': CAP_MARO, goma: CAP_GOMA }),
+    );
+    expect(resolved.get(CAP_MARO)).toBe('exchange/maro/');
+    expect(resolved.get(CAP_GOMA)).toBe('exchange/goma/');
+    expect(resolved.size).toBe(2);
+  });
+});
+
+describe('exchange limits', () => {
+  it('caps one exchanged object at 25 MiB', () => {
+    expect(MAX_EXCHANGE_OBJECT_SIZE).toBe(25 * 1024 * 1024);
+  });
 });
 
 describe('worker app (exchange routes via env wiring)', () => {
@@ -482,6 +613,21 @@ describe('worker app (exchange routes via env wiring)', () => {
       SLACK_SIGNING_SECRET: '<redacted>',
       PARTICIPANTS_JSON: '[]',
       EXCHANGE_CAPABILITIES_JSON: '{"agent:maro": "short"}',
+      EXCHANGE_BUCKET: new FakeBucket(),
+    };
+    expect(() => createAppFromEnv(env)).toThrow();
+  });
+
+  it('fails startup on a syntactically invalid EXCHANGE_CAPABILITIES_JSON', () => {
+    const env: EnvBindings = {
+      DB: new FakeD1(),
+      KV: new FakeKV(),
+      QUEUE: {
+        async send(_job: DeliveryJob) {},
+      },
+      SLACK_SIGNING_SECRET: '<redacted>',
+      PARTICIPANTS_JSON: '[]',
+      EXCHANGE_CAPABILITIES_JSON: '{not json',
       EXCHANGE_BUCKET: new FakeBucket(),
     };
     expect(() => createAppFromEnv(env)).toThrow();

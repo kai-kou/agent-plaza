@@ -585,6 +585,15 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
   // even validated, so an unauthenticated caller learns nothing. The
   // stored key is always the caller's prefix joined with the suffix;
   // no suffix can reach another participant's prefix.
+  //
+  // Presentation precedence: if the first path segment is a
+  // configured capability, the path form governs — the capability is
+  // that segment, the rest of the path is the suffix, and any
+  // Authorization / X-Capability headers are ignored. Otherwise the
+  // header form governs: the capability travels in a header and the
+  // entire remainder of the path is the suffix. The rule that
+  // Authorization and X-Capability must agree when both are present
+  // applies only in the header form.
   const exchangeObject = async (
     c: Context,
     method: 'GET' | 'PUT' | 'HEAD',
@@ -605,12 +614,13 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
       prefix = exchangeCapabilities.get(pathCapability);
       suffix = pathSuffix;
     } else {
-      // Header form: the capability travels in a header (same
-      // extraction rule as the doorbell header form) and the whole
-      // remainder of the path is the suffix. This branch also serves
-      // header-form requests whose suffix contains slashes, which the
-      // path-form pattern would otherwise claim with the first suffix
-      // segment in the capability position.
+      // Header form (see the precedence note above): the capability
+      // travels in a header (same extraction rule as the doorbell
+      // header form) and the whole remainder of the path is the
+      // suffix. This branch also serves header-form requests whose
+      // suffix contains slashes, which the path-form pattern would
+      // otherwise claim with the first suffix segment in the
+      // capability position.
       const presented = headerDoorbellCapability(
         c.req.header('authorization'),
         c.req.header('x-capability'),
@@ -647,12 +657,21 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
       });
       return c.json({ ok: true, key, size: body.byteLength });
     }
+    // Exchanged files are downloads, never inline content served
+    // from the hub origin: force an attachment disposition, block
+    // MIME sniffing, and sandbox any accidental rendering.
+    const downloadHeaders = {
+      'content-disposition': 'attachment',
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': 'sandbox',
+    };
     if (method === 'HEAD') {
       const head = await bucket.head(key);
       if (head === null) {
         return c.json({ error: 'not found' }, 404);
       }
       return c.body(null, 200, {
+        ...downloadHeaders,
         'content-length': String(head.size),
         'content-type':
           head.httpMetadata?.contentType ?? 'application/octet-stream',
@@ -664,6 +683,7 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
       return c.json({ error: 'not found' }, 404);
     }
     return c.body(await object.arrayBuffer(), 200, {
+      ...downloadHeaders,
       'content-length': String(object.size),
       'content-type':
         object.httpMetadata?.contentType ?? 'application/octet-stream',

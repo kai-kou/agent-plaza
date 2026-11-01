@@ -89,16 +89,19 @@ export function exchangePrefixFor(participantId: string): string {
  * the full prefix that value may touch. The map is
  * operator-maintained configuration, so malformed entries — bad
  * JSON, a non-object, an empty participant id, a non-string or
- * too-short value, a value duplicating another capability, or a
- * participant id that derives no valid prefix — throw instead of
- * silently weakening the route (fail-closed, exactly like the
- * doorbell capability resolution). Unset or empty means the route is
+ * too-short value, a value duplicating another capability, a
+ * participant id that derives no valid prefix, or two participant
+ * ids deriving the same prefix (e.g. `agent:maro` and `maro`, which
+ * would silently share one scope) — throw instead of silently
+ * weakening the route (fail-closed, exactly like the doorbell
+ * capability resolution). Unset or empty means the route is
  * not configured.
  */
 export function resolveExchangeCapabilities(
   perParticipantJson: string | undefined,
 ): Map<string, string> {
   const capabilities = new Map<string, string>();
+  const prefixes = new Map<string, string>();
   if (perParticipantJson === undefined || perParticipantJson === '') {
     return capabilities;
   }
@@ -136,7 +139,15 @@ export function resolveExchangeCapabilities(
         'EXCHANGE_CAPABILITIES_JSON capability values must be unique',
       );
     }
-    capabilities.set(value, exchangePrefixFor(participantId));
+    const prefix = exchangePrefixFor(participantId);
+    const prefixHolder = prefixes.get(prefix);
+    if (prefixHolder !== undefined) {
+      throw new Error(
+        `EXCHANGE_CAPABILITIES_JSON participant ids ${prefixHolder} and ${participantId} derive the same exchange prefix`,
+      );
+    }
+    prefixes.set(prefix, participantId);
+    capabilities.set(value, prefix);
   }
   return capabilities;
 }
