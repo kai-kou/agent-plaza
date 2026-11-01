@@ -108,9 +108,12 @@ describe('KvDoorbell', () => {
     const all = await doorbell.peekSince('thread-1', null);
     expect(all.events.length).toBe(DOORBELL_HISTORY_LIMIT);
     expect(all.events[0]?.eventId).toBe('evt-6');
-    // A cursor that aged out is reported out of range.
+    // A cursor that aged out is reported out of range, together with
+    // everything retained (the same branch as an unknown cursor).
     const aged = await doorbell.peekSince('thread-1', 'evt-1');
     expect(aged.outOfRange).toBe(true);
+    expect(aged.events.length).toBe(DOORBELL_HISTORY_LIMIT);
+    expect(aged.events[0]?.eventId).toBe('evt-6');
   });
 
   it('treats a malformed stored history as empty, and clearing removes the history too', async () => {
@@ -163,6 +166,51 @@ describe('KvDoorbell', () => {
     const all = await doorbell.peekSince('thread-1', null);
     expect(all.events.length).toBe(DOORBELL_HISTORY_LIMIT);
     expect(all.events[0]?.eventId).toBe('evt-6');
+  });
+
+  it('treats a non-array stored history as empty and drops malformed entries', async () => {
+    const kv = new FakeKV();
+    const doorbell = new KvDoorbell(kv);
+    kv.data.set('doorbell-history:thread-1', '{}');
+    expect((await doorbell.peekSince('thread-1', null)).events).toEqual([]);
+
+    kv.data.set(
+      'doorbell-history:thread-1',
+      JSON.stringify([
+        { eventId: 'evt-1', ts: '2026-10-27T00:00:00.000Z' },
+        { eventId: 42, ts: '2026-10-27T00:00:00.000Z' },
+        'not-an-object',
+        null,
+        { ts: '2026-10-27T00:00:00.000Z' },
+      ]),
+    );
+    expect((await doorbell.peekSince('thread-1', null)).events).toEqual([
+      { eventId: 'evt-1', ts: '2026-10-27T00:00:00.000Z' },
+    ]);
+  });
+
+  it('flags an unknown cursor as out of range even when nothing is retained', async () => {
+    const doorbell = new KvDoorbell(new FakeKV());
+    const result = await doorbell.peekSince('thread-1', 'evt-never-seen');
+    expect(result.events).toEqual([]);
+    expect(result.outOfRange).toBe(true);
+    expect(result.latest).toBeNull();
+  });
+
+  it('keeps a non-consecutively re-rung event twice, and a cursor resolves to its first occurrence', async () => {
+    // Only consecutive re-rings are deduplicated. A repeated event id
+    // later in the history stays, and peekSince answers from the first
+    // occurrence, which over-returns rather than dropping events the
+    // reader has not seen; the reader reconciles against the ledger.
+    const doorbell = new KvDoorbell(new FakeKV());
+    await doorbell.ring('thread-1', 'evt-1');
+    await doorbell.ring('thread-1', 'evt-2');
+    await doorbell.ring('thread-1', 'evt-1');
+    const all = await doorbell.peekSince('thread-1', null);
+    expect(all.events.map((f) => f.eventId)).toEqual(['evt-1', 'evt-2', 'evt-1']);
+    const after = await doorbell.peekSince('thread-1', 'evt-1');
+    expect(after.outOfRange).toBe(false);
+    expect(after.events.map((f) => f.eventId)).toEqual(['evt-2', 'evt-1']);
   });
 
   it('keeps histories for different threads independent', async () => {
