@@ -17,6 +17,12 @@
  *                       only the flag ({eventId, ts}) or {flag: null} —
  *                       never content — and a wrong capability is
  *                       indistinguishable from an unknown route (404).
+ *                       With a `?since=<eventId>` query it instead
+ *                       returns the cursor form ({events, outOfRange,
+ *                       latest}): the retained rings after the cursor,
+ *                       so a reader can detect and recover events whose
+ *                       flag it missed. An empty `since` reads from the
+ *                       start of the retained history.
  * - GET  /doorbell/:threadId
  *                       the header form of the same read route, for
  *                       readers whose credential systems cannot place a
@@ -450,6 +456,27 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
   // capability, so the two cannot be told apart by status or body.
   app.notFound((c) => c.json({ error: 'not found' }, 404));
 
+  // One read implementation for both presentations of the doorbell
+  // route. Without a `since` query the answer is the flag itself (or
+  // {flag: null}); with one, it is the cursor form served by
+  // KvDoorbell.peekSince. The capability check always runs first, so
+  // the since form reveals nothing to an unauthenticated caller.
+  const doorbellRead = async (threadId: string, since: string | undefined) => {
+    if (since === undefined) {
+      const flag = await deps.doorbell.peek(threadId);
+      return flag === null ? { flag: null } : flag;
+    }
+    const result = await deps.doorbell.peekSince(
+      threadId,
+      since === '' ? null : since,
+    );
+    return {
+      events: result.events,
+      outOfRange: result.outOfRange,
+      latest: result.latest,
+    };
+  };
+
   app.get('/doorbell/:capability/:threadId', async (c) => {
     if (
       doorbellCapabilities === undefined ||
@@ -457,8 +484,9 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
     ) {
       return c.json({ error: 'not found' }, 404);
     }
-    const flag = await deps.doorbell.peek(c.req.param('threadId'));
-    return flag === null ? c.json({ flag: null }) : c.json(flag);
+    return c.json(
+      await doorbellRead(c.req.param('threadId'), c.req.query('since')),
+    );
   });
 
   // Header form of the doorbell read route: same capability set and
@@ -476,8 +504,9 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
     ) {
       return c.json({ error: 'not found' }, 404);
     }
-    const flag = await deps.doorbell.peek(c.req.param('threadId'));
-    return flag === null ? c.json({ flag: null }) : c.json(flag);
+    return c.json(
+      await doorbellRead(c.req.param('threadId'), c.req.query('since')),
+    );
   });
 
   app.post('/admin/post', async (c) => {

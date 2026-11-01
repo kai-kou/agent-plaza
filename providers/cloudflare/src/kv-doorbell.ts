@@ -22,6 +22,29 @@ export interface DoorbellFlag {
 }
 
 /**
+ * How many recent rings are retained per key for the cursor read
+ * (`peekSince`). Bounded so the history stays a recovery aid, never a
+ * second ledger: once an event ages out of the retained window, a
+ * reader holding it as a cursor is told so (`outOfRange`) and falls
+ * back to reconciling against the ledger, as FR-9 already requires.
+ */
+export const DOORBELL_HISTORY_LIMIT = 50;
+
+export interface DoorbellSinceResult {
+  /** Retained events rung after the cursor, oldest first. */
+  events: DoorbellFlag[];
+  /**
+   * True when the cursor names an event that is not in the retained
+   * history (unknown, or aged out of the window). The retained events
+   * are still returned so the caller can reconcile; an out-of-range
+   * cursor is never silently answered with an empty list.
+   */
+  outOfRange: boolean;
+  /** The current flag, or null when absent or unreadable. */
+  latest: DoorbellFlag | null;
+}
+
+/**
  * The synthetic thread id whose flag is a channel's latest-event pointer:
  * `doorbell:<channel>:__latest__` names the latest event id rung for the
  * channel. Ingress moves this pointer whenever
@@ -47,12 +70,25 @@ export class KvDoorbell {
     return `doorbell:${threadId}`;
   }
 
+  static historyKeyFor(threadId: string): string {
+    return `doorbell-history:${threadId}`;
+  }
+
   /**
    * Ring for a thread. The flag is a pointer, not a queue: ringing again
    * replaces it, and peek can only ever return the latest event id. Who
    * clears the flag after consuming it is the reader's convention, fixed
    * where the reader is built; leaving it in place is safe because
    * readers compare the event id against what they already processed.
+   *
+   * Alongside the flag, each ring is appended to a bounded history for
+   * the same key (see {@link DOORBELL_HISTORY_LIMIT}), which the cursor
+   * read (`peekSince`) serves. The history carries the same
+   * `{eventId, ts}` pairs as the flag — never content. Its update is a
+   * KV read-modify-write, so two rings racing on one key can lose one
+   * history entry; that is acceptable for the same reason a lost flag
+   * is: the doorbell is a latency optimization, and the ledger remains
+   * the source of truth readers reconcile against.
    */
   async ring(threadId: string, eventId: string): Promise<void> {
     const flag: DoorbellFlag = {
@@ -60,6 +96,15 @@ export class KvDoorbell {
       ts: new Date().toISOString(),
     };
     await this.#kv.put(KvDoorbell.keyFor(threadId), JSON.stringify(flag));
+    const history = await this.#readHistory(threadId);
+    if (history[history.length - 1]?.eventId !== eventId) {
+      history.push(flag);
+    }
+    const bounded = history.slice(-DOORBELL_HISTORY_LIMIT);
+    await this.#kv.put(
+      KvDoorbell.historyKeyFor(threadId),
+      JSON.stringify(bounded),
+    );
   }
 
   /** The current flag, or null when absent or unreadable. */
@@ -80,7 +125,52 @@ export class KvDoorbell {
     }
   }
 
+  /**
+   * The retained events rung after `sinceEventId`, oldest first, for a
+   * reader that polls with a cursor (the last event id it processed).
+   * A null cursor returns everything retained. A cursor that names no
+   * retained event — unknown, or aged out of the bounded window — is
+   * reported with `outOfRange: true` and the full retained history, so
+   * the reader can tell "nothing new" from "my cursor fell off" and
+   * reconcile instead of silently missing events.
+   */
+  async peekSince(
+    threadId: string,
+    sinceEventId: string | null,
+  ): Promise<DoorbellSinceResult> {
+    const history = await this.#readHistory(threadId);
+    const latest = await this.peek(threadId);
+    if (sinceEventId === null) {
+      return { events: history, outOfRange: false, latest };
+    }
+    const index = history.findIndex((f) => f.eventId === sinceEventId);
+    if (index === -1) {
+      return { events: history, outOfRange: true, latest };
+    }
+    return { events: history.slice(index + 1), outOfRange: false, latest };
+  }
+
   async clear(threadId: string): Promise<void> {
     await this.#kv.delete(KvDoorbell.keyFor(threadId));
+    await this.#kv.delete(KvDoorbell.historyKeyFor(threadId));
+  }
+
+  /** The retained history for a key; a missing or malformed value reads as empty. */
+  async #readHistory(threadId: string): Promise<DoorbellFlag[]> {
+    const raw = await this.#kv.get(KvDoorbell.historyKeyFor(threadId));
+    if (raw === null) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(
+        (entry): entry is DoorbellFlag =>
+          typeof entry === 'object' &&
+          entry !== null &&
+          typeof (entry as DoorbellFlag).eventId === 'string' &&
+          typeof (entry as DoorbellFlag).ts === 'string',
+      );
+    } catch {
+      return [];
+    }
   }
 }
