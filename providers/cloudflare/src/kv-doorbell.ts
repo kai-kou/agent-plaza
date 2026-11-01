@@ -85,10 +85,13 @@ export class KvDoorbell {
    * the same key (see {@link DOORBELL_HISTORY_LIMIT}), which the cursor
    * read (`peekSince`) serves. The history carries the same
    * `{eventId, ts}` pairs as the flag — never content. Its update is a
-   * KV read-modify-write, so two rings racing on one key can lose one
-   * history entry; that is acceptable for the same reason a lost flag
-   * is: the doorbell is a latency optimization, and the ledger remains
-   * the source of truth readers reconcile against.
+   * KV read-modify-write, so the loss model is wider than a single
+   * entry: two rings racing on one key can lose an entry, and because
+   * KV is eventually consistent, an update based on an older snapshot
+   * can drop several entries at once or revive entries that had aged
+   * out of the window. That is acceptable for the same reason a lost
+   * flag is: the doorbell is a latency optimization, and the ledger
+   * remains the source of truth readers reconcile against.
    */
   async ring(threadId: string, eventId: string): Promise<void> {
     const flag: DoorbellFlag = {

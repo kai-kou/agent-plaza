@@ -251,6 +251,16 @@ describe('worker app (doorbell read route)', () => {
     expect(body.outOfRange).toBe(false);
     expect(body.latest?.eventId).toBe('Ev3');
 
+    // An empty since reads from the start of the retained history.
+    const fromStart = await app.request(`${doorbellUrl(CAP, THREAD)}?since=`);
+    expect(fromStart.status).toBe(200);
+    const fromStartBody = (await fromStart.json()) as {
+      events: { eventId: string }[];
+      outOfRange: boolean;
+    };
+    expect(fromStartBody.events.map((f) => f.eventId)).toEqual(['Ev1', 'Ev2', 'Ev3']);
+    expect(fromStartBody.outOfRange).toBe(false);
+
     // Without the query the response keeps its legacy shape.
     const legacy = await app.request(doorbellUrl(CAP, THREAD));
     expect(legacy.status).toBe(200);

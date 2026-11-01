@@ -163,11 +163,16 @@ setup itself is part of the live-integration step, not this provider).
   `{events, outOfRange, latest}`: the rings retained after the cursor
   (each the same `{eventId, ts}` pair, oldest first), whether the
   cursor fell outside the retained window, and the current flag. The
-  hub retains the last 50 rings per key for this read; an unknown or
+  hub retains the last 50 events per key for this read (consecutive
+  re-rings of the same event are kept once); an unknown or
   aged-out cursor answers `outOfRange: true` together with everything
   retained, never a silent empty list, so a reader can tell "nothing
   new" from "my cursor fell off" and reconcile against the ledger.
   An empty `since` reads from the start of the retained history.
+  If the tail of `events` does not reach `latest.eventId`, do not
+  advance the cursor to `latest` blindly — reconcile against the
+  ledger first. A re-ring refreshes the flag's `ts` but keeps the
+  history entry's original `ts`, so judge by eventId, not by `ts`.
   Treat the
   capability URL as a credential for the reader's local configuration
   only: never commit it. If a per-participant capability leaks,
