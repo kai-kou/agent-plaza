@@ -158,7 +158,22 @@ setup itself is part of the live-integration step, not this provider).
   `Authorization: Bearer <capability>` or `X-Capability: <capability>`
   header (when both headers are present they must agree) — with
   identical response and failure behavior. The response is the flag
-  (`{eventId, ts}`) or `{flag: null}` — never content. Treat the
+  (`{eventId, ts}`) or `{flag: null}` — never content. Both forms also
+  accept a `?since=<eventId>` query, which answers in a cursor form —
+  `{events, outOfRange, latest}`: the rings retained after the cursor
+  (each the same `{eventId, ts}` pair, oldest first), whether the
+  cursor fell outside the retained window, and the current flag. The
+  hub retains the last 50 events per key for this read (consecutive
+  re-rings of the same event are kept once); an unknown or
+  aged-out cursor answers `outOfRange: true` together with everything
+  retained, never a silent empty list, so a reader can tell "nothing
+  new" from "my cursor fell off" and reconcile against the ledger.
+  An empty `since` reads from the start of the retained history.
+  If the tail of `events` does not reach `latest.eventId`, do not
+  advance the cursor to `latest` blindly — reconcile against the
+  ledger first. A re-ring refreshes the flag's `ts` but keeps the
+  history entry's original `ts`, so judge by eventId, not by `ts`.
+  Treat the
   capability URL as a credential for the reader's local configuration
   only: never commit it. If a per-participant capability leaks,
   remove that reader's entry from `DOORBELL_CAPABILITIES_JSON` — or,

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createHmac } from 'node:crypto';
 import {
+  KvDoorbell,
   ThreadLedgerObject,
   createAppFromEnv,
   resolveDoorbellCapabilities,
@@ -228,6 +229,78 @@ describe('worker app (doorbell read route)', () => {
     const app = createAppFromEnv(env);
     const res = await app.request(doorbellUrl(CAP, THREAD));
     expect(res.status).toBe(404);
+  });
+
+  it('serves the events after a since cursor, with the same capability rules', async () => {
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    const doorbell = new KvDoorbell(kv);
+    await doorbell.ring(THREAD, 'Ev1');
+    await doorbell.ring(THREAD, 'Ev2');
+    await doorbell.ring(THREAD, 'Ev3');
+    const app = createAppFromEnv(env);
+
+    const res = await app.request(`${doorbellUrl(CAP, THREAD)}?since=Ev1`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      events: { eventId: string }[];
+      outOfRange: boolean;
+      latest: { eventId: string } | null;
+    };
+    expect(body.events.map((f) => f.eventId)).toEqual(['Ev2', 'Ev3']);
+    expect(body.outOfRange).toBe(false);
+    expect(body.latest?.eventId).toBe('Ev3');
+
+    // An empty since reads from the start of the retained history.
+    const fromStart = await app.request(`${doorbellUrl(CAP, THREAD)}?since=`);
+    expect(fromStart.status).toBe(200);
+    const fromStartBody = (await fromStart.json()) as {
+      events: { eventId: string }[];
+      outOfRange: boolean;
+    };
+    expect(fromStartBody.events.map((f) => f.eventId)).toEqual(['Ev1', 'Ev2', 'Ev3']);
+    expect(fromStartBody.outOfRange).toBe(false);
+
+    // Without the query the response keeps its legacy shape.
+    const legacy = await app.request(doorbellUrl(CAP, THREAD));
+    expect(legacy.status).toBe(200);
+    expect((await legacy.json() as { eventId: string }).eventId).toBe('Ev3');
+
+    // The capability rules are identical for the since form.
+    const wrong = await app.request(`${doorbellUrl('nope', THREAD)}?since=Ev1`);
+    expect(wrong.status).toBe(404);
+  });
+
+  it('reports an unknown since cursor as out of range, and serves since through the header form', async () => {
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    const doorbell = new KvDoorbell(kv);
+    await doorbell.ring(THREAD, 'Ev1');
+    const app = createAppFromEnv(env);
+
+    const res = await app.request(`${doorbellUrl(CAP, THREAD)}?since=EvUnknown`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { outOfRange: boolean; events: { eventId: string }[] };
+    expect(body.outOfRange).toBe(true);
+    expect(body.events.map((f) => f.eventId)).toEqual(['Ev1']);
+
+    const headerRes = await app.request(
+      `http://hub.test/doorbell/${encodeURIComponent(THREAD)}?since=Ev1`,
+      { headers: { authorization: `Bearer ${CAP}` } },
+    );
+    expect(headerRes.status).toBe(200);
+    const headerBody = (await headerRes.json()) as { outOfRange: boolean; events: unknown[] };
+    expect(headerBody.outOfRange).toBe(false);
+    expect(headerBody.events).toEqual([]);
+
+    // The header form applies the same capability rules to the since
+    // form: a wrong capability is indistinguishable from an unknown route.
+    const wrongHeader = await app.request(
+      `http://hub.test/doorbell/${encodeURIComponent(THREAD)}?since=Ev1`,
+      { headers: { authorization: 'Bearer nope' } },
+    );
+    expect(wrongHeader.status).toBe(404);
+    expect(await wrongHeader.json()).toEqual({ error: 'not found' });
   });
 
   it('treats a too-short capability as not configured', async () => {
