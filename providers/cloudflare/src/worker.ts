@@ -33,6 +33,27 @@
  *                       response, and the same indistinguishable 404
  *                       apply; when both headers are present they must
  *                       agree.
+ * - GET|PUT|HEAD /exchange/:capability/<key...>
+ *                       the file-exchange routes. The capability is a
+ *                       per-participant value from
+ *                       EXCHANGE_CAPABILITIES_JSON and is scoped to
+ *                       one bucket prefix, exchange/<short-id>/: the
+ *                       caller supplies only the key suffix after that
+ *                       prefix, so no capability can touch another
+ *                       participant's prefix. Objects live in the R2
+ *                       bucket bound as EXCHANGE_BUCKET; the routes
+ *                       behave as unconfigured (the same
+ *                       indistinguishable 404 as an unknown route) when
+ *                       the bucket or a valid capability is absent.
+ *                       PUT is capped at MAX_EXCHANGE_OBJECT_SIZE
+ *                       (over it, 413). There is no listing and no
+ *                       delete.
+ * - GET|PUT|HEAD /exchange/<key...>
+ *                       the header form of the exchange routes, with
+ *                       the capability in an `Authorization: Bearer`
+ *                       or `X-Capability` header (same extraction rule
+ *                       as the doorbell header form, including the
+ *                       both-headers-must-agree rule).
  * - POST /slack/events  Slack Events API ingress. The signature is
  *   verified first; url_verification challenges are answered inline.
  *   Message events are processed by the ingress core (slack-events.ts),
@@ -53,10 +74,17 @@
  * request-time code.
  */
 
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import type { Participant } from '@agent-plaza/core';
 import { D1LedgerStore, type D1DatabaseLike } from './d1-ledger-store.js';
 import { KvDoorbell, type KVNamespaceLike } from './kv-doorbell.js';
+import {
+  MAX_EXCHANGE_OBJECT_SIZE,
+  MIN_EXCHANGE_CAPABILITY_LENGTH,
+  isValidExchangeKeySuffix,
+  resolveExchangeCapabilities,
+  type R2BucketLike,
+} from './r2-exchange.js';
 import { QueueDelivery, type QueueProducerLike } from './queue.js';
 import { verifySlackSignature } from './slack-signature.js';
 import {
@@ -120,6 +148,23 @@ export interface EnvBindings {
    * fails startup (see resolveDoorbellCapabilities).
    */
   DOORBELL_CAPABILITY_SIRO?: string;
+  /**
+   * Per-participant exchange capabilities as a JSON object mapping
+   * participant id to capability, issued per participant like the
+   * doorbell capabilities but as a separate secret: an exchange
+   * capability authorizes reads AND writes under that participant's
+   * exchange prefix, so it is never interchangeable with a doorbell
+   * capability. Set it with
+   * `wrangler secret put EXCHANGE_CAPABILITIES_JSON`; malformed
+   * entries fail startup (see resolveExchangeCapabilities).
+   */
+  EXCHANGE_CAPABILITIES_JSON?: string;
+  /**
+   * The R2 bucket the exchange routes serve. Optional in the type:
+   * when the binding is absent the exchange routes behave as
+   * unconfigured (404), like every other unconfigured route here.
+   */
+  EXCHANGE_BUCKET?: R2BucketLike;
   /**
    * Bot User OAuth Token of the hub's Slack app, used only by the
    * /admin/post route to post as the hub bot. A secret; never logged
@@ -417,6 +462,19 @@ export interface WorkerDeps extends SlackEventsDeps {
   signingSecret: string;
   /** Capability segments accepted by the doorbell read route (see EnvBindings). */
   doorbellCapabilities?: ReadonlySet<string>;
+  /** Bucket for the exchange routes (see EnvBindings). */
+  exchangeBucket?: R2BucketLike;
+  /**
+   * Exchange capability value -> the full bucket prefix that value
+   * may touch (`exchange/<short-id>/`), resolved from
+   * EXCHANGE_CAPABILITIES_JSON by createAppFromEnv.
+   */
+  exchangeCapabilities?: ReadonlyMap<string, string>;
+  /**
+   * Per-object PUT cap for the exchange routes, in bytes. Defaults to
+   * MAX_EXCHANGE_OBJECT_SIZE; injectable so tests can use a small cap.
+   */
+  exchangeMaxObjectSize?: number;
   /** Capability for the /admin/post route (see EnvBindings). */
   adminCapability?: string;
   /** Bot token for the /admin/post route (see EnvBindings). */
@@ -449,6 +507,19 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
             (v) => v.length >= MIN_DOORBELL_CAPABILITY_LENGTH,
           ),
         );
+  // The same fail-closed rule as the doorbell capabilities, for any
+  // deps source: an exchange capability shorter than the minimum
+  // never takes effect.
+  const exchangeCapabilities =
+    deps.exchangeCapabilities === undefined
+      ? undefined
+      : new Map(
+          [...deps.exchangeCapabilities].filter(
+            ([value]) => value.length >= MIN_EXCHANGE_CAPABILITY_LENGTH,
+          ),
+        );
+  const exchangeMaxObjectSize =
+    deps.exchangeMaxObjectSize ?? MAX_EXCHANGE_OBJECT_SIZE;
 
   app.get('/healthz', (c) => c.text('ok'));
 
@@ -508,6 +579,132 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
       await doorbellRead(c.req.param('threadId'), c.req.query('since')),
     );
   });
+
+  // One implementation for both presentations of the exchange routes.
+  // The capability check always runs first, before the key suffix is
+  // even validated, so an unauthenticated caller learns nothing. The
+  // stored key is always the caller's prefix joined with the suffix;
+  // no suffix can reach another participant's prefix.
+  //
+  // Presentation precedence: if the first path segment is a
+  // configured capability, the path form governs — the capability is
+  // that segment, the rest of the path is the suffix, and any
+  // Authorization / X-Capability headers are ignored. Otherwise the
+  // header form governs: the capability travels in a header and the
+  // entire remainder of the path is the suffix. The rule that
+  // Authorization and X-Capability must agree when both are present
+  // applies only in the header form.
+  const exchangeObject = async (
+    c: Context,
+    method: 'GET' | 'PUT' | 'HEAD',
+    remainder: string,
+    pathCapability: string | undefined,
+    pathSuffix: string | undefined,
+  ) => {
+    const bucket = deps.exchangeBucket;
+    if (bucket === undefined || exchangeCapabilities === undefined) {
+      return c.json({ error: 'not found' }, 404);
+    }
+    let prefix: string | undefined;
+    let suffix: string | undefined;
+    if (
+      pathCapability !== undefined &&
+      exchangeCapabilities.has(pathCapability)
+    ) {
+      prefix = exchangeCapabilities.get(pathCapability);
+      suffix = pathSuffix;
+    } else {
+      // Header form (see the precedence note above): the capability
+      // travels in a header (same extraction rule as the doorbell
+      // header form) and the whole remainder of the path is the
+      // suffix. This branch also serves header-form requests whose
+      // suffix contains slashes, which the path-form pattern would
+      // otherwise claim with the first suffix segment in the
+      // capability position.
+      const presented = headerDoorbellCapability(
+        c.req.header('authorization'),
+        c.req.header('x-capability'),
+      );
+      if (presented !== undefined && exchangeCapabilities.has(presented)) {
+        prefix = exchangeCapabilities.get(presented);
+        suffix = remainder;
+      }
+    }
+    if (prefix === undefined || suffix === undefined) {
+      return c.json({ error: 'not found' }, 404);
+    }
+    if (!isValidExchangeKeySuffix(suffix)) {
+      return c.json({ error: 'invalid key' }, 400);
+    }
+    const key = `${prefix}${suffix}`;
+    if (method === 'PUT') {
+      const declared = c.req.header('content-length');
+      if (
+        declared !== undefined &&
+        Number(declared) > exchangeMaxObjectSize
+      ) {
+        return c.json({ error: 'too large' }, 413);
+      }
+      const body = await c.req.arrayBuffer();
+      if (body.byteLength > exchangeMaxObjectSize) {
+        return c.json({ error: 'too large' }, 413);
+      }
+      await bucket.put(key, body, {
+        httpMetadata: {
+          contentType:
+            c.req.header('content-type') ?? 'application/octet-stream',
+        },
+      });
+      return c.json({ ok: true, key, size: body.byteLength });
+    }
+    // Exchanged files are downloads, never inline content served
+    // from the hub origin: force an attachment disposition, block
+    // MIME sniffing, and sandbox any accidental rendering.
+    const downloadHeaders = {
+      'content-disposition': 'attachment',
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': 'sandbox',
+    };
+    if (method === 'HEAD') {
+      const head = await bucket.head(key);
+      if (head === null) {
+        return c.json({ error: 'not found' }, 404);
+      }
+      return c.body(null, 200, {
+        ...downloadHeaders,
+        'content-length': String(head.size),
+        'content-type':
+          head.httpMetadata?.contentType ?? 'application/octet-stream',
+        ...(head.etag === undefined ? {} : { etag: head.etag }),
+      });
+    }
+    const object = await bucket.get(key);
+    if (object === null) {
+      return c.json({ error: 'not found' }, 404);
+    }
+    return c.body(await object.arrayBuffer(), 200, {
+      ...downloadHeaders,
+      'content-length': String(object.size),
+      'content-type':
+        object.httpMetadata?.contentType ?? 'application/octet-stream',
+      ...(object.etag === undefined ? {} : { etag: object.etag }),
+    });
+  };
+
+  for (const method of ['GET', 'PUT', 'HEAD'] as const) {
+    app.on(method, '/exchange/:capability/:key{.+}', (c) =>
+      exchangeObject(
+        c,
+        method,
+        `${c.req.param('capability')}/${c.req.param('key')}`,
+        c.req.param('capability'),
+        c.req.param('key'),
+      ),
+    );
+    app.on(method, '/exchange/:key{.+}', (c) =>
+      exchangeObject(c, method, c.req.param('key'), undefined, undefined),
+    );
+  }
 
   app.post('/admin/post', async (c) => {
     const capability = deps.adminCapability;
@@ -594,6 +791,9 @@ export function createAppFromEnv(env: EnvBindings): Hono {
     env.DOORBELL_CAPABILITIES_JSON,
     { 'agent:siro': env.DOORBELL_CAPABILITY_SIRO },
   );
+  const exchangeCapabilities = resolveExchangeCapabilities(
+    env.EXCHANGE_CAPABILITIES_JSON,
+  );
   const forwardToThread =
     env.THREAD_LEDGER === undefined
       ? undefined
@@ -615,6 +815,10 @@ export function createAppFromEnv(env: EnvBindings): Hono {
     ...base,
     signingSecret: env.SLACK_SIGNING_SECRET,
     ...(doorbellCapabilities.size === 0 ? {} : { doorbellCapabilities }),
+    ...(exchangeCapabilities.size === 0 ? {} : { exchangeCapabilities }),
+    ...(env.EXCHANGE_BUCKET === undefined
+      ? {}
+      : { exchangeBucket: env.EXCHANGE_BUCKET }),
     ...(env.ADMIN_CAPABILITY === undefined || env.ADMIN_CAPABILITY === ''
       ? {}
       : { adminCapability: env.ADMIN_CAPABILITY }),

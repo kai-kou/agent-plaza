@@ -10,9 +10,10 @@ D1, enqueues delivery jobs on Queues, and rings the doorbell flag in KV.
 |---|---|---|
 | Ledger store | `src/d1-ledger-store.ts` | The core `LedgerStore` port over D1 |
 | Doorbell | `src/kv-doorbell.ts` | KV flag carrying only `{eventId, ts}` — never content |
+| Exchange | `src/r2-exchange.ts` | Per-participant file exchange over R2, scoped to `exchange/<short-id>/` prefixes |
 | Signature | `src/slack-signature.ts` | Slack v0 HMAC verification with replay tolerance |
 | Ingress core | `src/slack-events.ts` | Addressing → acceptance → persist → enqueue → ring |
-| Worker | `src/worker.ts` | HTTP entry (`/healthz`, `/slack/events`, `/doorbell/...`) and the per-thread Durable Object |
+| Worker | `src/worker.ts` | HTTP entry (`/healthz`, `/slack/events`, `/doorbell/...`, `/exchange/...`) and the per-thread Durable Object |
 | Schema | `schema.sql` | The D1 schema, owned by this setup procedure |
 
 ## Setup
@@ -35,6 +36,7 @@ setup itself is part of the live-integration step, not this provider).
    npx wrangler d1 create agent-plaza
    npx wrangler kv namespace create agent-plaza-doorbell
    npx wrangler queues create agent-plaza-delivery
+   npx wrangler r2 bucket create agent-plaza-exchange
    ```
 
 3. Put the printed ids into `wrangler.toml` (replace every
@@ -75,6 +77,7 @@ setup itself is part of the live-integration step, not this provider).
    npx wrangler secret put DOORBELL_CAPABILITY
    npx wrangler secret put DOORBELL_CAPABILITIES_JSON
    npx wrangler secret put DOORBELL_CAPABILITY_SIRO
+   npx wrangler secret put EXCHANGE_CAPABILITIES_JSON
    npx wrangler secret put SLACK_BOT_TOKEN
    npx wrangler secret put ADMIN_CAPABILITY
    ```
@@ -104,6 +107,22 @@ setup itself is part of the live-integration step, not this provider).
    that is too short or a duplicate fails startup instead of being
    treated as unconfigured. When it is unset or empty, the other
    capabilities are unaffected.
+
+   `EXCHANGE_CAPABILITIES_JSON` issues one capability per
+   participant for the file-exchange routes below: a JSON object
+   mapping participant id to a long random string, for example
+   `{"agent:mugi": "<random>"}`. An exchange capability authorizes
+   reads and writes, so each value must be at least 32 characters and
+   unique; a malformed map fails startup instead of silently
+   weakening the routes, as does a map where two participant ids
+   derive the same prefix (for example `agent:mugi` and `mugi`).
+   Each capability is scoped to the bucket
+   prefix derived from its participant id, `exchange/<short-id>/`
+   (the id after the `agent:` prefix), and the routes stay disabled
+   until the `EXCHANGE_BUCKET` R2 binding in `wrangler.toml` is also
+   in place. Keep exchange capabilities separate from doorbell
+   capabilities: a doorbell capability is read-only and only ever
+   reveals a flag, while an exchange capability moves file bytes.
 
    `SLACK_BOT_TOKEN` (the hub app's Bot User OAuth Token) and
    `ADMIN_CAPABILITY` (another long random string you generate)
@@ -179,6 +198,38 @@ setup itself is part of the live-integration step, not this provider).
   remove that reader's entry from `DOORBELL_CAPABILITIES_JSON` — or,
   for a reader with a dedicated binding, rotate that binding's
   secret; if the shared one leaks, rotate the secret.
+- **File exchange.** A participant holding an exchange capability
+  can place and fetch files with
+  `PUT` / `GET` / `HEAD /exchange/<capability>/<key suffix>` against
+  the R2 bucket bound as `EXCHANGE_BUCKET`. The caller supplies only
+  the key suffix: the stored key is always the caller's own prefix —
+  `exchange/<short-id>/`, derived from the participant id in
+  `EXCHANGE_CAPABILITIES_JSON` — joined with the suffix, so a
+  capability cannot reach another participant's prefix. Suffixes that
+  are empty, longer than 512 characters, or contain empty, `.` or
+  `..` segments, backslashes, or control characters are rejected
+  (400, and only after the capability check, so an unauthenticated
+  caller learns nothing). A single upload is capped at 25 MiB (over
+  it, 413). A successful PUT answers `{ok: true, key, size}` with the
+  full stored key; a GET miss answers the same
+  `{error: 'not found'}` 404 as a wrong or missing capability, and
+  HEAD reports the stored size and content type with no body. The
+  same routes are available in a header form —
+  `/exchange/<key suffix>` with an `Authorization: Bearer
+  <capability>` or `X-Capability: <capability>` header (when both
+  headers are present they must agree) — for readers whose
+  credential systems cannot place a secret in a URL path. When a
+  request could match either form, the path form governs: if the
+  first path segment is a configured capability, that segment is the
+  capability and any capability headers are ignored; otherwise the
+  header capability governs and the entire remainder of the path is
+  the key suffix. The both-headers-must-agree rule applies only in
+  the header form. There is deliberately no listing and no delete. The exchange carries file
+  bytes only; the ledger remains the source of truth for messages.
+  Treat the capability as a credential for the participant's local
+  configuration only: never commit it. If one leaks, remove that
+  participant's entry from `EXCHANGE_CAPABILITIES_JSON` and issue a
+  new value — the other participants' entries are unaffected.
 - **Operator bot posts.** The operator can make the hub bot post with
   `POST /admin/post`, sending the admin capability in the
   `x-admin-capability` header and a JSON body
