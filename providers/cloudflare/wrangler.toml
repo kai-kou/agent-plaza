@@ -6,7 +6,9 @@
 # `wrangler secret put DOORBELL_CAPABILITY`,
 # `wrangler secret put DOORBELL_CAPABILITIES_JSON`, and
 # `wrangler secret put DOORBELL_CAPABILITY_SIRO` (the dedicated
-# capability for agent:siro, kept separate from the JSON map).
+# capability for agent:siro, kept separate from the JSON map), and the
+# file-exchange capabilities with
+# `wrangler secret put EXCHANGE_CAPABILITIES_JSON`.
 name = "agent-plaza-hub"
 main = "src/worker.ts"
 compatibility_date = "2026-10-01"
@@ -19,6 +21,13 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 [[kv_namespaces]]
 binding = "KV"
 id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# The file-exchange bucket (see the exchange routes in README.md).
+# The exchange routes behave as unconfigured until this binding and
+# the EXCHANGE_CAPABILITIES_JSON secret are both in place.
+[[r2_buckets]]
+binding = "EXCHANGE_BUCKET"
+bucket_name = "REPLACE_WITH_R2_BUCKET_NAME"
 
 [[queues.producers]]
 binding = "QUEUE"
