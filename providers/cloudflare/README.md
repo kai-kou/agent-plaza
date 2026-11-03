@@ -258,8 +258,15 @@ setup itself is part of the live-integration step, not this provider).
   caps denial addressed by an explicit mention also rings the
   doorbell once per accepted -> denied transition for the thread —
   the denied-notice carries the usual `{eventId, ts}` payload and no
-  content, and it never appears on the doorbell read routes as
-  anything but a flag.
+  content. On the doorbell read routes, the flag form returns
+  `{eventId, ts}` only, while the since form (`peekSince`) includes
+  the kind in its events, so a denied-notice shows there as
+  `kind: 'denied-notice'`; the denied-log rows themselves are never
+  mixed into either doorbell read form. Switching to stage 2 (setting
+  `DENIED_NOTICE_ENABLED` to `"true"`) has not been verified as a
+  dashboard-only vars edit versus a wrangler redeploy: at redeploy
+  time, confirm which route applies the change, and confirm the new
+  value is in effect before treating stage 2 as enabled.
 - **Addressing reach.** The ingress supplies Slack mentions and thread
   continuation. Role and broadcast addressing are not parsed here —
   structured marker parsing (M4) owns them. Bot-origin posts are

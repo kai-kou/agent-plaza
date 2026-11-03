@@ -73,8 +73,12 @@
  *                       for one thread, guarded by the same
  *                       ADMIN_CAPABILITY header and the same
  *                       indistinguishable 404. The denied log is never
- *                       mixed into the doorbell read routes: a doorbell
- *                       reader sees flags only, never denials.
+ *                       mixed into the doorbell read routes: the flag
+ *                       form returns `{eventId, ts}` only, while the
+ *                       since form (`peekSince`) includes the kind in
+ *                       its events, so a denied-notice shows there as
+ *                       kind `'denied-notice'` — but no denied-log row
+ *                       ever appears on a doorbell read route.
  *                       Denied-notice ringing is gated separately by
  *                       the DENIED_NOTICE_ENABLED var ("true" enables
  *                       stage 2; unset or anything else is stage 1,
@@ -198,7 +202,10 @@ export interface EnvBindings {
    * string "true" enables stage 2; unset or any other value keeps
    * stage 1 (denied logging without ringing). Set with
    * `wrangler secret put` or a vars entry only after stage-1 logging
-   * has been verified against real threads.
+   * has been verified against real threads. Whether a vars change
+   * takes effect without a redeploy is unverified: at redeploy time,
+   * confirm the route that applies the change and that the new value
+   * is in effect before treating stage 2 as enabled.
    */
   DENIED_NOTICE_ENABLED?: string;
   THREAD_LEDGER?: DurableObjectNamespaceLike;

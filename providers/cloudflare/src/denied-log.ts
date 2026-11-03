@@ -7,7 +7,11 @@
  * Slack event id so a Slack retry cannot double-record it. The row
  * carries no message body, no body hash, no secret, and no raw Slack
  * user id — the sender is the normalized participant id, exactly as
- * FR-34 requires of the audit log.
+ * FR-34 requires of the audit log. One documented exception: an
+ * unknown sender cannot be normalized (resolveParticipantId leaves it
+ * unchanged), so its sender_id stays a `slack:`-prefixed platform id.
+ * That value is visible only through the admin-capability-protected
+ * denied-log read, never through the doorbell read routes.
  *
  * The D1 binding is consumed through the same minimal structural
  * interface as D1LedgerStore, so the store can be exercised against a
@@ -49,7 +53,12 @@ export interface DeniedLogRecord {
   addressingBasis: string;
   /** Recipients the addressing decision produced, if any. */
   recipients: string[];
-  /** Whether this denial rang a denied-notice doorbell (FR-53). */
+  /**
+   * Whether this denial rang a denied-notice doorbell (FR-53): true
+   * only when both rings (channel pointer and thread flag) succeeded.
+   * A partial ring failure leaves this false and the transition latch
+   * unconsumed, so the next denial retries the notice.
+   */
   noticeRung: boolean;
 }
 

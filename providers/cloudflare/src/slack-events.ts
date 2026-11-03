@@ -481,8 +481,12 @@ function summarizeDeniedReason(
  * target (accept is called without correctsMessageId, so this reason
  * cannot occur via Slack ingress today); only the limit is known, and
  * the actual value is null rather than guessed.
+ *
+ * Exported for unit tests: the mapping is pure, and the
+ * correction-round case in particular cannot be driven through Slack
+ * ingress, so its { actual: null, limit } shape is pinned directly.
  */
-function capsForDeniedReason(
+export function capsForDeniedReason(
   reason: DeniedReasonCode,
   snapshot: ThreadLedgerSnapshot,
   senderId: string,
@@ -547,6 +551,12 @@ interface DenialInput {
  * The console log and the D1 row carry the same fields and neither
  * carries the post body, the body hash, a secret, or a raw Slack user
  * id — the sender is the normalized participant id.
+ *
+ * Ring order matters for partial failure (see the ring block below):
+ * the channel pointer rings first and the thread flag second, so a
+ * failure of either ring leaves the transition latch unconsumed and
+ * the next denial retries the notice. `noticeRung` means both rings
+ * succeeded.
  */
 async function recordDenial(
   deps: SlackEventsDeps,
@@ -572,7 +582,17 @@ async function recordDenial(
     try {
       const lastKind = await deps.doorbell.lastKind(input.threadId);
       if (lastKind !== 'denied-notice') {
-        await deps.doorbell.ring(input.threadId, input.eventId, 'denied-notice');
+        // Ring the channel pointer FIRST, then the thread flag. The
+        // thread flag's history is the transition latch: it is only
+        // consumed once the thread-flag ring succeeds. If the channel
+        // ring fails, the exception aborts before the latch moves, so
+        // the next denial retries the whole notice. If the thread-flag
+        // ring fails after the channel ring, the latch is likewise
+        // untouched, and the retry's duplicate channel ring is a
+        // harmless extra wake (design §5.3). The previous order
+        // (thread flag first) lost the wake in exactly this partial
+        // failure: the latch was consumed while the channel pointer
+        // — the key Tier-C hooks poll — never moved.
         // Move the channel pointer too: Tier-C hooks poll one key per
         // channel, so a thread-flag-only ring would not wake them.
         await deps.doorbell.ring(
@@ -580,6 +600,10 @@ async function recordDenial(
           input.eventId,
           'denied-notice',
         );
+        await deps.doorbell.ring(input.threadId, input.eventId, 'denied-notice');
+        // noticeRung means both rings succeeded: a partial failure
+        // leaves it false even when the channel pointer already moved,
+        // so the log never claims a notice the latch did not record.
         noticeRung = true;
       }
     } catch {
