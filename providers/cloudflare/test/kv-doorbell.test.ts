@@ -131,12 +131,14 @@ describe('KvDoorbell', () => {
     expect((await doorbell.peekSince('thread-1', null)).latest).toBeNull();
   });
 
-  it('projects stored entries onto {eventId, ts} and never re-persists extra fields', async () => {
+  it('projects stored entries onto {eventId, ts, kind} and never re-persists extra fields', async () => {
     const kv = new FakeKV();
     const doorbell = new KvDoorbell(kv);
-    // A stored entry carrying fields beyond the flag shape (from a
+    // A stored entry carrying fields beyond the history shape (from a
     // future writer, a manual edit, or partial corruption) must not be
-    // served: the stored value is a trust boundary (SEC-3).
+    // served: the stored value is a trust boundary (SEC-3). An entry
+    // without a kind (written before kinds existed) reads as
+    // 'accepted'; only the kind field, never content fields, survives.
     kv.data.set(
       'doorbell-history:thread-1',
       JSON.stringify([
@@ -144,14 +146,14 @@ describe('KvDoorbell', () => {
       ]),
     );
     const result = await doorbell.peekSince('thread-1', null);
-    expect(result.events).toEqual([{ eventId: 'evt-1', ts: '2026-10-27T00:00:00.000Z' }]);
+    expect(result.events).toEqual([{ eventId: 'evt-1', ts: '2026-10-27T00:00:00.000Z', kind: 'accepted' }]);
 
     // A later ring re-saves the history without the extra fields.
     await doorbell.ring('thread-1', 'evt-2');
     const stored = JSON.parse(kv.data.get('doorbell-history:thread-1')!) as Record<string, unknown>[];
     expect(stored.map((e) => Object.keys(e).sort())).toEqual([
-      ['eventId', 'ts'],
-      ['eventId', 'ts'],
+      ['eventId', 'kind', 'ts'],
+      ['eventId', 'kind', 'ts'],
     ]);
   });
 
@@ -185,7 +187,7 @@ describe('KvDoorbell', () => {
       ]),
     );
     expect((await doorbell.peekSince('thread-1', null)).events).toEqual([
-      { eventId: 'evt-1', ts: '2026-10-27T00:00:00.000Z' },
+      { eventId: 'evt-1', ts: '2026-10-27T00:00:00.000Z', kind: 'accepted' },
     ]);
   });
 
@@ -219,6 +221,56 @@ describe('KvDoorbell', () => {
     await doorbell.ring('thread-2', 'evt-2');
     expect((await doorbell.peekSince('thread-1', null)).events.map((f) => f.eventId)).toEqual(['evt-1']);
     expect((await doorbell.peekSince('thread-2', null)).events.map((f) => f.eventId)).toEqual(['evt-2']);
+  });
+
+  it('rings with a kind: the flag stays {eventId, ts} while the history keeps the kind', async () => {
+    const kv = new FakeKV();
+    const doorbell = new KvDoorbell(kv);
+    await doorbell.ring('thread-1', 'evt-1');
+    await doorbell.ring('thread-1', 'evt-2', 'denied-notice');
+    // The flag itself never carries the kind: existing readers see
+    // exactly the old shape.
+    expect(Object.keys(JSON.parse(kv.data.get('doorbell:thread-1')!) as object).sort()).toEqual(['eventId', 'ts']);
+    expect((await doorbell.peek('thread-1'))?.eventId).toBe('evt-2');
+
+    const all = await doorbell.peekSince('thread-1', null);
+    expect(all.events.map((f) => ({ eventId: f.eventId, kind: f.kind }))).toEqual([
+      { eventId: 'evt-1', kind: 'accepted' },
+      { eventId: 'evt-2', kind: 'denied-notice' },
+    ]);
+    // Ringing without a kind defaults to 'accepted'.
+    await doorbell.ring('thread-1', 'evt-3');
+    expect(await doorbell.lastKind('thread-1')).toBe('accepted');
+  });
+
+  it('reports the latest history kind, and an accepted ring resets it', async () => {
+    const doorbell = new KvDoorbell(new FakeKV());
+    expect(await doorbell.lastKind('thread-1')).toBeNull();
+    await doorbell.ring('thread-1', 'evt-1');
+    expect(await doorbell.lastKind('thread-1')).toBe('accepted');
+    await doorbell.ring('thread-1', 'evt-2', 'denied-notice');
+    expect(await doorbell.lastKind('thread-1')).toBe('denied-notice');
+    await doorbell.ring('thread-1', 'evt-3');
+    expect(await doorbell.lastKind('thread-1')).toBe('accepted');
+  });
+
+  it('treats kind-less legacy entries as accepted, and drops unknown kinds', async () => {
+    const kv = new FakeKV();
+    const doorbell = new KvDoorbell(kv);
+    kv.data.set(
+      'doorbell-history:thread-1',
+      JSON.stringify([
+        { eventId: 'evt-old', ts: '2026-10-27T00:00:00.000Z' },
+        { eventId: 'evt-weird', ts: '2026-10-27T00:00:00.000Z', kind: 'something-else' },
+        { eventId: 'evt-new', ts: '2026-10-27T00:00:00.000Z', kind: 'denied-notice' },
+      ]),
+    );
+    const all = await doorbell.peekSince('thread-1', null);
+    expect(all.events.map((f) => ({ eventId: f.eventId, kind: f.kind }))).toEqual([
+      { eventId: 'evt-old', kind: 'accepted' },
+      { eventId: 'evt-new', kind: 'denied-notice' },
+    ]);
+    expect(await doorbell.lastKind('thread-1')).toBe('denied-notice');
   });
 
   it('derives the channel-latest pointer id, distinct from any real thread id', async () => {

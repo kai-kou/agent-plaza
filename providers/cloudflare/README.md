@@ -243,6 +243,23 @@ setup itself is part of the live-integration step, not this provider).
   This route is the operator's mouthpiece for the hub bot
   (announcements, interop tests such as V-1 case B); it is not the
   delivery consumer for queued jobs.
+- **Denied log and denied-notice (FR-53).** A post the ledger denies
+  never reaches the ledger, the queue, or the ordinary doorbell, but
+  it is recorded: a structured console log line immediately, and a
+  row in the D1 `denied_log` table (see `schema.sql`; apply it to D1
+  before deploying a build that writes it — the write is best-effort,
+  so a missing table costs early rows, not Slack responses). The
+  operator reads one thread's denials with
+  `GET /admin/denied-log?threadId=…` and the `x-admin-capability`
+  header; a wrong or missing capability answers 404, as with
+  `/admin/post`. Denied rows carry no body, no body hash, no secret,
+  and no raw Slack user id. When `DENIED_NOTICE_ENABLED` is `"true"`
+  (stage 2; the shipped default `"false"` is stage 1, log only), a
+  caps denial addressed by an explicit mention also rings the
+  doorbell once per accepted -> denied transition for the thread —
+  the denied-notice carries the usual `{eventId, ts}` payload and no
+  content, and it never appears on the doorbell read routes as
+  anything but a flag.
 - **Addressing reach.** The ingress supplies Slack mentions and thread
   continuation. Role and broadcast addressing are not parsed here —
   structured marker parsing (M4) owns them. Bot-origin posts are

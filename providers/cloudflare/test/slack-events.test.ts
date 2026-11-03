@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
   ThreadLedger,
@@ -11,6 +11,8 @@ import {
   QueueDelivery,
   handleSlackEvent,
   type DeliveryJob,
+  type DeniedLogRecord,
+  type DeniedLogStore,
   type KVNamespaceLike,
   type SlackEventsDeps,
 } from '@agent-plaza/cloudflare';
@@ -46,9 +48,25 @@ const participants: Participant[] = [
   { id: 'slack:U200', displayName: 'Alpha', aliases: ['Alpha'], roles: ['research'], kind: 'agent' },
 ];
 
+class FakeDeniedLog implements DeniedLogStore {
+  readonly records: DeniedLogRecord[] = [];
+  failNext = false;
+  async record(record: DeniedLogRecord): Promise<void> {
+    if (this.failNext) {
+      this.failNext = false;
+      throw new Error('d1 unavailable');
+    }
+    this.records.push(record);
+  }
+  async listByThread(threadId: string): Promise<DeniedLogRecord[]> {
+    return this.records.filter((r) => r.threadId === threadId);
+  }
+}
+
 function makeDeps(overrides: Partial<SlackEventsDeps> = {}) {
   const store = new MapStore();
   const kv = new FakeKV();
+  const deniedLog = new FakeDeniedLog();
   const jobs: DeliveryJob[] = [];
   let failNextSend = false;
   const deps: SlackEventsDeps = {
@@ -63,6 +81,7 @@ function makeDeps(overrides: Partial<SlackEventsDeps> = {}) {
         jobs.push(job);
       },
     }),
+    deniedLog,
     participants,
     ...overrides,
   };
@@ -70,6 +89,7 @@ function makeDeps(overrides: Partial<SlackEventsDeps> = {}) {
     deps,
     store,
     kv,
+    deniedLog,
     jobs,
     failNextQueueSend: () => {
       failNextSend = true;
@@ -213,8 +233,10 @@ describe('handleSlackEvent', () => {
     expect(jobs).toHaveLength(1);
   });
 
-  it('denies an unregistered sender and signals nothing', async () => {
-    const { deps, store, jobs } = makeDeps();
+  it('denies an unregistered sender: logged only, never rung (FR-53)', async () => {
+    const { deps, store, jobs, deniedLog } = makeDeps({
+      deniedNoticeEnabled: true,
+    });
     const r = await handleSlackEvent(
       deps,
       messageBody({ eventId: 'Ev9', user: 'U999', text: 'hello' }),
@@ -223,6 +245,22 @@ describe('handleSlackEvent', () => {
     expect(store.data.size).toBe(0);
     expect(jobs).toHaveLength(0);
     expect(await deps.doorbell.peek('C1:1793100000.000100')).toBeNull();
+    expect(await deps.doorbell.peek('C1:__latest__')).toBeNull();
+    // The denial is recorded even though nothing rings: an
+    // unregistered sender is not a notice-eligible reason.
+    expect(deniedLog.records).toHaveLength(1);
+    expect(deniedLog.records[0]).toMatchObject({
+      threadId: 'C1:1793100000.000100',
+      eventId: 'Ev9',
+      slackTs: '1793100000.000100',
+      senderId: 'slack:U999',
+      reason: 'unregistered_sender',
+      capsActual: null,
+      capsLimit: null,
+      addressingBasis: 'none',
+      recipients: [],
+      noticeRung: false,
+    });
   });
 
   it('ignores edit/delete subtypes and non-message events, rejects malformed bodies', async () => {
@@ -489,5 +527,224 @@ describe('sender alias resolution (senderIds)', () => {
     expect(r.kind).toBe('accepted');
     if (r.kind !== 'accepted') throw new Error('unreachable');
     expect(r.entry.envelope.recipientIds).toEqual(['slack:U300']);
+  });
+});
+
+describe('denied posts (FR-53)', () => {
+  // Only the thread total binds: every other cap is loose, so the
+  // third agent post in the thread is a thread_cap denial.
+  const SMALL_THREAD_CAPS = {
+    maxThreadMessages: 2,
+    maxPerAgent: 10,
+    maxPairRoundTrips: 10,
+    maxConsecutiveByAgent: 10,
+    maxSameContent: 10,
+    maxCorrectionRounds: 3,
+  };
+  const ROOT_TS = '1793100000.000100';
+  const THREAD = `C1:${ROOT_TS}`;
+
+  function agentPost(eventId: string, ts: string, text: string): string {
+    return messageBody({
+      eventId,
+      user: 'U200',
+      text,
+      ts,
+      threadTs: ROOT_TS,
+      subtype: 'bot_message',
+      botId: 'B200',
+    });
+  }
+
+  // The denial tests write structured console logs; silence them so
+  // the test output stays readable. The durable record is asserted
+  // through the fake denied log, which mirrors the console fields.
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('rings a denied-notice once per accepted -> denied transition, and revives after an accepted post', async () => {
+    const { deps, store, jobs, deniedLog } = makeDeps({
+      caps: SMALL_THREAD_CAPS,
+      deniedNoticeEnabled: true,
+    });
+    expect(
+      (await handleSlackEvent(deps, agentPost('EvA1', '1793100000.000200', '<@U100> one'))).kind,
+    ).toBe('accepted');
+    expect(
+      (await handleSlackEvent(deps, agentPost('EvA2', '1793100000.000300', '<@U100> two'))).kind,
+    ).toBe('accepted');
+
+    // First denial: logged with the cap values, and rung on both the
+    // thread flag and the channel pointer.
+    const d1 = await handleSlackEvent(deps, agentPost('EvD1', '1793100000.000400', '<@U100> three'));
+    expect(d1.kind).toBe('denied');
+    if (d1.kind !== 'denied') throw new Error('unreachable');
+    expect(d1.reason).toBe('thread_cap');
+    expect(deniedLog.records).toHaveLength(1);
+    expect(deniedLog.records[0]).toMatchObject({
+      threadId: THREAD,
+      eventId: 'EvD1',
+      slackTs: '1793100000.000400',
+      senderId: 'slack:U200',
+      reason: 'thread_cap',
+      capsActual: 2,
+      capsLimit: 2,
+      addressingBasis: 'mention',
+      recipients: ['slack:U100'],
+      noticeRung: true,
+    });
+    expect((await deps.doorbell.peek(THREAD))?.eventId).toBe('EvD1');
+    expect((await deps.doorbell.peek('C1:__latest__'))?.eventId).toBe('EvD1');
+    expect(await deps.doorbell.lastKind(THREAD)).toBe('denied-notice');
+    // The denial advanced nothing: still 2 accepted entries, 2 jobs.
+    expect((await store.load(THREAD))?.entries).toHaveLength(2);
+    expect(jobs).toHaveLength(2);
+
+    // Second denial in the same episode: logged, but not re-rung.
+    const d2 = await handleSlackEvent(deps, agentPost('EvD2', '1793100000.000500', '<@U100> four'));
+    expect(d2.kind).toBe('denied');
+    expect(deniedLog.records).toHaveLength(2);
+    expect(deniedLog.records[1]).toMatchObject({
+      eventId: 'EvD2',
+      reason: 'thread_cap',
+      noticeRung: false,
+    });
+    expect((await deps.doorbell.peek(THREAD))?.eventId).toBe('EvD1');
+    expect((await deps.doorbell.peek('C1:__latest__'))?.eventId).toBe('EvD1');
+    expect(await deps.doorbell.lastKind(THREAD)).toBe('denied-notice');
+
+    // A human post is accepted and resets both the caps and the
+    // transition: the flag moves to the accepted ring.
+    const human = await handleSlackEvent(
+      deps,
+      messageBody({
+        eventId: 'EvH',
+        user: 'U100',
+        text: 'continue',
+        ts: '1793100000.000600',
+        threadTs: ROOT_TS,
+      }),
+    );
+    expect(human.kind).toBe('accepted');
+    expect(await deps.doorbell.lastKind(THREAD)).toBe('accepted');
+
+    // Fill the thread again: two accepted agent posts, then a denial
+    // that rings again.
+    expect(
+      (await handleSlackEvent(deps, agentPost('EvA3', '1793100000.000700', '<@U100> five'))).kind,
+    ).toBe('accepted');
+    expect(
+      (await handleSlackEvent(deps, agentPost('EvA4', '1793100000.000800', '<@U100> six'))).kind,
+    ).toBe('accepted');
+    const d3 = await handleSlackEvent(deps, agentPost('EvD3', '1793100000.000900', '<@U100> seven'));
+    expect(d3.kind).toBe('denied');
+    expect(deniedLog.records).toHaveLength(3);
+    expect(deniedLog.records[2]).toMatchObject({
+      eventId: 'EvD3',
+      reason: 'thread_cap',
+      noticeRung: true,
+    });
+    expect((await deps.doorbell.peek(THREAD))?.eventId).toBe('EvD3');
+    expect(await deps.doorbell.lastKind(THREAD)).toBe('denied-notice');
+  });
+
+  it('does not ring for a mention-less caps denial, but still logs it', async () => {
+    const { deps, deniedLog } = makeDeps({
+      caps: SMALL_THREAD_CAPS,
+      deniedNoticeEnabled: true,
+    });
+    expect(
+      (await handleSlackEvent(deps, agentPost('EvP1', '1793100000.000200', 'plain one'))).kind,
+    ).toBe('accepted');
+    expect(
+      (await handleSlackEvent(deps, agentPost('EvP2', '1793100000.000300', 'plain two'))).kind,
+    ).toBe('accepted');
+    const d = await handleSlackEvent(deps, agentPost('EvP3', '1793100000.000400', 'plain three'));
+    expect(d.kind).toBe('denied');
+    expect(deniedLog.records).toHaveLength(1);
+    expect(deniedLog.records[0]).toMatchObject({
+      eventId: 'EvP3',
+      reason: 'thread_cap',
+      addressingBasis: 'none',
+      recipients: [],
+      noticeRung: false,
+    });
+    // The flag still points at the last accepted post.
+    expect((await deps.doorbell.peek(THREAD))?.eventId).toBe('EvP2');
+    expect(await deps.doorbell.lastKind(THREAD)).toBe('accepted');
+  });
+
+  it('logs without ringing when denied-notice is disabled (stage 1)', async () => {
+    const { deps, deniedLog } = makeDeps({ caps: SMALL_THREAD_CAPS });
+    expect(
+      (await handleSlackEvent(deps, agentPost('EvA1', '1793100000.000200', '<@U100> one'))).kind,
+    ).toBe('accepted');
+    expect(
+      (await handleSlackEvent(deps, agentPost('EvA2', '1793100000.000300', '<@U100> two'))).kind,
+    ).toBe('accepted');
+    const d = await handleSlackEvent(deps, agentPost('EvD1', '1793100000.000400', '<@U100> three'));
+    expect(d.kind).toBe('denied');
+    expect(deniedLog.records).toHaveLength(1);
+    expect(deniedLog.records[0]).toMatchObject({
+      eventId: 'EvD1',
+      reason: 'thread_cap',
+      noticeRung: false,
+    });
+    expect((await deps.doorbell.peek(THREAD))?.eventId).toBe('EvA2');
+    expect(await deps.doorbell.lastKind(THREAD)).toBe('accepted');
+  });
+
+  it('keeps the Slack response intact when the doorbell read fails', async () => {
+    // A KV failure during the transition check must not turn a denial
+    // into an error: the denial is still logged, with no notice rung.
+    class ThrowingHistoryKV extends FakeKV {
+      override async get(key: string): Promise<string | null> {
+        if (key.startsWith('doorbell-history:')) {
+          throw new Error('kv unavailable');
+        }
+        return super.get(key);
+      }
+    }
+    const { deps, deniedLog } = makeDeps({
+      caps: SMALL_THREAD_CAPS,
+      deniedNoticeEnabled: true,
+    });
+    expect(
+      (await handleSlackEvent(deps, agentPost('EvA1', '1793100000.000200', '<@U100> one'))).kind,
+    ).toBe('accepted');
+    expect(
+      (await handleSlackEvent(deps, agentPost('EvA2', '1793100000.000300', '<@U100> two'))).kind,
+    ).toBe('accepted');
+    // Swap in the failing doorbell only for the denied attempt: the
+    // accepted path's ring failure is pre-existing behavior, while
+    // the denied path must stay best-effort.
+    deps.doorbell = new KvDoorbell(new ThrowingHistoryKV());
+    const d = await handleSlackEvent(deps, agentPost('EvD1', '1793100000.000400', '<@U100> three'));
+    expect(d.kind).toBe('denied');
+    expect(deniedLog.records).toHaveLength(1);
+    expect(deniedLog.records[0]).toMatchObject({
+      eventId: 'EvD1',
+      reason: 'thread_cap',
+      noticeRung: false,
+    });
+  });
+
+  it('keeps the Slack response intact when the D1 write fails', async () => {
+    const { deps, store, jobs, deniedLog } = makeDeps();
+    deniedLog.failNext = true;
+    const r = await handleSlackEvent(
+      deps,
+      messageBody({ eventId: 'Ev9', user: 'U999', text: 'hello' }),
+    );
+    expect(r.kind).toBe('denied');
+    expect(r).toEqual({ kind: 'denied', reason: 'sender slack:U999 is not a registered participant' });
+    expect(store.data.size).toBe(0);
+    expect(jobs).toHaveLength(0);
+    expect(deniedLog.records).toHaveLength(0);
   });
 });
