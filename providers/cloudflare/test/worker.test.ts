@@ -12,8 +12,23 @@ import {
   type KVNamespaceLike,
 } from '@agent-plaza/cloudflare';
 
+interface FakeDeniedRow {
+  thread_id: string;
+  event_id: string;
+  slack_ts: string;
+  recorded_at: string;
+  sender_id: string;
+  reason: string;
+  caps_actual: number | null;
+  caps_limit: number | null;
+  addressing_basis: string;
+  recipients_json: string;
+  notice_rung: number;
+}
+
 class FakeD1 implements D1DatabaseLike {
   readonly rows = new Map<string, string>();
+  readonly deniedRows: FakeDeniedRow[] = [];
   prepare(query: string): D1PreparedStatementLike {
     const self = this;
     let bound: unknown[] = [];
@@ -35,7 +50,40 @@ class FakeD1 implements D1DatabaseLike {
           self.rows.set(bound[0] as string, bound[1] as string);
           return {};
         }
+        if (query.startsWith('INSERT INTO denied_log')) {
+          const row: FakeDeniedRow = {
+            thread_id: bound[0] as string,
+            event_id: bound[1] as string,
+            slack_ts: bound[2] as string,
+            recorded_at: bound[3] as string,
+            sender_id: bound[4] as string,
+            reason: bound[5] as string,
+            caps_actual: bound[6] as number | null,
+            caps_limit: bound[7] as number | null,
+            addressing_basis: bound[8] as string,
+            recipients_json: bound[9] as string,
+            notice_rung: bound[10] as number,
+          };
+          if (!self.deniedRows.some((r) => r.event_id === row.event_id)) {
+            self.deniedRows.push(row);
+          }
+          return {};
+        }
         throw new Error(`fake D1: unexpected run() for: ${query}`);
+      },
+      async all<T>() {
+        if (query.startsWith('SELECT') && query.includes('FROM denied_log')) {
+          const results = self.deniedRows
+            .filter((r) => r.thread_id === bound[0])
+            .sort(
+              (a, b) =>
+                a.recorded_at.localeCompare(b.recorded_at) ||
+                a.slack_ts.localeCompare(b.slack_ts) ||
+                a.event_id.localeCompare(b.event_id),
+            );
+          return { results: results as T[] };
+        }
+        throw new Error(`fake D1: unexpected all() for: ${query}`);
       },
     };
     return stmt;
@@ -893,5 +941,116 @@ describe('PARTICIPANTS_JSON sender-id uniqueness', () => {
       { id: 'slack:U300', displayName: 'Beta', aliases: [], roles: [], kind: 'agent', senderIds: [''] },
     ]);
     expect(() => createAppFromEnv(env)).toThrow(/PARTICIPANTS_JSON/);
+  });
+});
+
+describe('worker app (admin denied-log route)', () => {
+  const ADMIN_CAP = 'test-admin-capability-0123456789';
+  const THREAD = 'C1:1793100000.000100';
+
+  function deniedLogUrl(thread: string): string {
+    return `http://hub.test/admin/denied-log?threadId=${encodeURIComponent(thread)}`;
+  }
+
+  function deniedRequest(capability: string | undefined): Request {
+    return new Request(deniedLogUrl(THREAD), {
+      headers:
+        capability === undefined
+          ? {}
+          : { 'x-admin-capability': capability },
+    });
+  }
+
+  const DENIED_MESSAGE = JSON.stringify({
+    type: 'event_callback',
+    team_id: 'T1',
+    event_id: 'Ev9',
+    event: {
+      type: 'message',
+      user: 'U999',
+      channel: 'C1',
+      ts: '1793100000.000100',
+      text: 'hello',
+    },
+  });
+
+  it('serves one thread denials through the capability, and 404s without it', async () => {
+    const { env, db } = makeEnv(false);
+    env.ADMIN_CAPABILITY = ADMIN_CAP;
+    env.DOORBELL_CAPABILITY = 'test-capability-0123456789abcdef';
+    const app = createAppFromEnv(env);
+
+    // Drive a real denial through ingress: the Slack response stays
+    // { ok: true, kind: 'denied' } while the row lands in D1.
+    const denied = await app.fetch(signedRequest(DENIED_MESSAGE));
+    expect(denied.status).toBe(200);
+    expect(await denied.json()).toEqual({ ok: true, kind: 'denied' });
+    expect(db.deniedRows).toHaveLength(1);
+
+    const ok = await app.fetch(deniedRequest(ADMIN_CAP));
+    expect(ok.status).toBe(200);
+    const body = (await ok.json()) as {
+      threadId: string;
+      records: Record<string, unknown>[];
+    };
+    expect(body.threadId).toBe(THREAD);
+    expect(body.records).toHaveLength(1);
+    expect(body.records[0]).toMatchObject({
+      threadId: THREAD,
+      eventId: 'Ev9',
+      senderId: 'slack:U999',
+      reason: 'unregistered_sender',
+      noticeRung: false,
+    });
+
+    const other = await app.fetch(
+      new Request(deniedLogUrl('C1:other'), {
+        headers: { 'x-admin-capability': ADMIN_CAP },
+      }),
+    );
+    expect(other.status).toBe(200);
+    expect(
+      ((await other.json()) as { records: unknown[] }).records,
+    ).toEqual([]);
+
+    const missing = await app.fetch(deniedRequest(undefined));
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: 'not found' });
+    const wrong = await app.fetch(deniedRequest('nope'));
+    expect(wrong.status).toBe(404);
+    expect(await wrong.json()).toEqual({ error: 'not found' });
+
+    const noThread = await app.fetch(
+      new Request('http://hub.test/admin/denied-log', {
+        headers: { 'x-admin-capability': ADMIN_CAP },
+      }),
+    );
+    expect(noThread.status).toBe(400);
+
+    // The doorbell read route never mixes denied rows in: a denial
+    // rang nothing, so the flag reads null.
+    const flag = await app.fetch(
+      new Request(
+        `http://hub.test/doorbell/test-capability-0123456789abcdef/${encodeURIComponent(THREAD)}`,
+      ),
+    );
+    expect(flag.status).toBe(200);
+    expect(await flag.json()).toEqual({ flag: null });
+  });
+
+  it('is disabled when the capability is not configured', async () => {
+    const { env } = makeEnv(false);
+    const app = createAppFromEnv(env);
+    const res = await app.fetch(deniedRequest(ADMIN_CAP));
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'not found' });
+  });
+
+  it('is disabled when the capability is too short', async () => {
+    const { env } = makeEnv(false);
+    env.ADMIN_CAPABILITY = 'short';
+    const app = createAppFromEnv(env);
+    const res = await app.fetch(deniedRequest('short'));
+    expect(res.status).toBe(404);
   });
 });

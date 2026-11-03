@@ -68,6 +68,21 @@
  *   configured. Posts go only to allowlisted channels. This is how the
  *   operator makes the hub bot speak (announcements, interop tests);
  *   it is not a general delivery consumer.
+ * - GET  /admin/denied-log?threadId=…
+ *                       Operator-only read of the denied log (FR-53)
+ *                       for one thread, guarded by the same
+ *                       ADMIN_CAPABILITY header and the same
+ *                       indistinguishable 404. The denied log is never
+ *                       mixed into the doorbell read routes: the flag
+ *                       form returns `{eventId, ts}` only, while the
+ *                       since form (`peekSince`) includes the kind in
+ *                       its events, so a denied-notice shows there as
+ *                       kind `'denied-notice'` — but no denied-log row
+ *                       ever appears on a doorbell read route.
+ *                       Denied-notice ringing is gated separately by
+ *                       the DENIED_NOTICE_ENABLED var ("true" enables
+ *                       stage 2; unset or anything else is stage 1,
+ *                       log only).
  *
  * Bindings and secrets are described in providers/cloudflare/README.md.
  * The D1 schema is owned by the setup procedure (schema.sql), not by
@@ -77,6 +92,7 @@
 import { Hono, type Context } from 'hono';
 import type { Participant } from '@agent-plaza/core';
 import { D1LedgerStore, type D1DatabaseLike } from './d1-ledger-store.js';
+import { D1DeniedLogStore } from './denied-log.js';
 import { KvDoorbell, type KVNamespaceLike } from './kv-doorbell.js';
 import {
   MAX_EXCHANGE_OBJECT_SIZE,
@@ -181,6 +197,17 @@ export interface EnvBindings {
    * this one authorizes posting as the hub bot.
    */
   ADMIN_CAPABILITY?: string;
+  /**
+   * Stage gate for denied-notice ringing (FR-53). Only the exact
+   * string "true" enables stage 2; unset or any other value keeps
+   * stage 1 (denied logging without ringing). Set with
+   * `wrangler secret put` or a vars entry only after stage-1 logging
+   * has been verified against real threads. Whether a vars change
+   * takes effect without a redeploy is unverified: at redeploy time,
+   * confirm the route that applies the change and that the new value
+   * is in effect before treating stage 2 as enabled.
+   */
+  DENIED_NOTICE_ENABLED?: string;
   THREAD_LEDGER?: DurableObjectNamespaceLike;
 }
 
@@ -266,6 +293,8 @@ function depsFromEnv(env: EnvBindings): SlackEventsDeps {
     store: new D1LedgerStore(env.DB),
     doorbell: new KvDoorbell(env.KV),
     delivery: new QueueDelivery(env.QUEUE),
+    deniedLog: new D1DeniedLogStore(env.DB),
+    deniedNoticeEnabled: env.DENIED_NOTICE_ENABLED === 'true',
     participants: parseParticipantArray(env.PARTICIPANTS_JSON),
     ...(env.ALLOWED_CHANNEL_IDS_JSON === undefined
       ? {}
@@ -705,6 +734,24 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
       exchangeObject(c, method, c.req.param('key'), undefined, undefined),
     );
   }
+
+  app.get('/admin/denied-log', async (c) => {
+    const capability = deps.adminCapability;
+    if (
+      capability === undefined ||
+      capability.length < MIN_ADMIN_CAPABILITY_LENGTH ||
+      c.req.header('x-admin-capability') !== capability ||
+      deps.deniedLog === undefined
+    ) {
+      return c.json({ error: 'not found' }, 404);
+    }
+    const threadId = c.req.query('threadId');
+    if (threadId === undefined || threadId === '') {
+      return c.json({ error: 'invalid threadId' }, 400);
+    }
+    const records = await deps.deniedLog.listByThread(threadId);
+    return c.json({ threadId, records });
+  });
 
   app.post('/admin/post', async (c) => {
     const capability = deps.adminCapability;

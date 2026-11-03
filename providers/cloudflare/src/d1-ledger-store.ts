@@ -14,6 +14,12 @@ export interface D1PreparedStatementLike {
   bind(...values: unknown[]): D1PreparedStatementLike;
   first<T>(): Promise<T | null>;
   run(): Promise<unknown>;
+  /**
+   * Multi-row read (the real D1 binding's `all()`). Optional so
+   * single-row fakes in existing tests keep working; stores that list
+   * rows require it and fail loudly when it is absent.
+   */
+  all?<T>(): Promise<{ results: T[] }>;
 }
 
 export interface D1DatabaseLike {

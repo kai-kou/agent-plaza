@@ -22,6 +22,27 @@ export interface DoorbellFlag {
 }
 
 /**
+ * What a history entry signals. `'accepted'` is the ordinary ring for
+ * an accepted post; `'denied-notice'` is the transition-only signal
+ * for a denied post (FR-53): it carries the same `{eventId, ts}`
+ * payload and no content, and exists only in the history — the flag
+ * itself stays `{eventId, ts}` so existing readers are unaffected.
+ */
+export type DoorbellKind = 'accepted' | 'denied-notice';
+
+/**
+ * One retained history entry. `kind` is always present on entries
+ * written by this version; entries written before `kind` existed read
+ * as `'accepted'`.
+ */
+export interface DoorbellHistoryEntry {
+  eventId: string;
+  /** When the doorbell was rung (ISO 8601), not when the event occurred. */
+  ts: string;
+  kind: DoorbellKind;
+}
+
+/**
  * How many recent rings are retained per key for the cursor read
  * (`peekSince`). Bounded so the history stays a recovery aid, never a
  * second ledger: once an event ages out of the retained window, a
@@ -32,7 +53,7 @@ export const DOORBELL_HISTORY_LIMIT = 50;
 
 export interface DoorbellSinceResult {
   /** Retained events rung after the cursor, oldest first. */
-  events: DoorbellFlag[];
+  events: DoorbellHistoryEntry[];
   /**
    * True when the cursor names an event that is not in the retained
    * history (unknown, or aged out of the window). The retained events
@@ -93,7 +114,11 @@ export class KvDoorbell {
    * flag is: the doorbell is a latency optimization, and the ledger
    * remains the source of truth readers reconcile against.
    */
-  async ring(threadId: string, eventId: string): Promise<void> {
+  async ring(
+    threadId: string,
+    eventId: string,
+    kind: DoorbellKind = 'accepted',
+  ): Promise<void> {
     const flag: DoorbellFlag = {
       eventId,
       ts: new Date().toISOString(),
@@ -101,13 +126,25 @@ export class KvDoorbell {
     await this.#kv.put(KvDoorbell.keyFor(threadId), JSON.stringify(flag));
     const history = await this.#readHistory(threadId);
     if (history[history.length - 1]?.eventId !== eventId) {
-      history.push(flag);
+      history.push({ ...flag, kind });
     }
     const bounded = history.slice(-DOORBELL_HISTORY_LIMIT);
     await this.#kv.put(
       KvDoorbell.historyKeyFor(threadId),
       JSON.stringify(bounded),
     );
+  }
+
+  /**
+   * The kind of the most recent retained history entry for a thread,
+   * or null when the thread has no retained history. The denied-notice
+   * transition check (FR-53) reads this: a thread whose latest entry
+   * is already a denied-notice does not ring again until an accepted
+   * ring resets it.
+   */
+  async lastKind(threadId: string): Promise<DoorbellKind | null> {
+    const history = await this.#readHistory(threadId);
+    return history[history.length - 1]?.kind ?? null;
   }
 
   /** The current flag, or null when absent or unreadable. */
@@ -159,27 +196,36 @@ export class KvDoorbell {
   }
 
   /** The retained history for a key; a missing or malformed value reads as empty. */
-  async #readHistory(threadId: string): Promise<DoorbellFlag[]> {
+  async #readHistory(threadId: string): Promise<DoorbellHistoryEntry[]> {
     const raw = await this.#kv.get(KvDoorbell.historyKeyFor(threadId));
     if (raw === null) return [];
     try {
       const parsed: unknown = JSON.parse(raw);
       if (!Array.isArray(parsed)) return [];
       // The stored value is a trust boundary: project each entry onto a
-      // fresh {eventId, ts} object so extra fields a writer (or a manual
-      // edit, or partial corruption) put there are never served or
-      // re-persisted, exactly as peek() does for the flag. The read side
-      // also re-applies the retention limit, so an over-long stored
-      // value stays bounded (fail-closed).
+      // fresh {eventId, ts, kind} object so extra fields a writer (or a
+      // manual edit, or partial corruption) put there are never served
+      // or re-persisted, exactly as peek() does for the flag. An entry
+      // without a kind (written before kinds existed) reads as
+      // 'accepted'; an entry with any other kind value is dropped. The
+      // read side also re-applies the retention limit, so an over-long
+      // stored value stays bounded (fail-closed).
       return parsed
         .filter(
-          (entry): entry is DoorbellFlag =>
+          (entry): entry is DoorbellHistoryEntry =>
             typeof entry === 'object' &&
             entry !== null &&
-            typeof (entry as DoorbellFlag).eventId === 'string' &&
-            typeof (entry as DoorbellFlag).ts === 'string',
+            typeof (entry as DoorbellHistoryEntry).eventId === 'string' &&
+            typeof (entry as DoorbellHistoryEntry).ts === 'string' &&
+            ((entry as DoorbellHistoryEntry).kind === undefined ||
+              (entry as DoorbellHistoryEntry).kind === 'accepted' ||
+              (entry as DoorbellHistoryEntry).kind === 'denied-notice'),
         )
-        .map((entry) => ({ eventId: entry.eventId, ts: entry.ts }))
+        .map((entry) => ({
+          eventId: entry.eventId,
+          ts: entry.ts,
+          kind: entry.kind ?? 'accepted',
+        }))
         .slice(-DOORBELL_HISTORY_LIMIT);
     } catch {
       return [];

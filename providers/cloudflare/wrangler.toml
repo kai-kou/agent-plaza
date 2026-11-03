@@ -54,3 +54,11 @@ new_sqlite_classes = ["ThreadLedgerObject"]
 [vars]
 PARTICIPANTS_JSON = "[]"
 ALLOWED_CHANNEL_IDS_JSON = "[]"
+# Denied-notice stage gate (FR-53). "false" is stage 1: denials are
+# logged (console + D1 denied_log) but never ring. Flip to "true"
+# only after stage-1 logging has been verified against real threads
+# (stage 2: transition-only denied-notice ringing). Apply the
+# denied_log table from schema.sql to D1 BEFORE deploying a build
+# that writes it; the write is best-effort, so a missing table costs
+# early log rows, not Slack responses.
+DENIED_NOTICE_ENABLED = "false"

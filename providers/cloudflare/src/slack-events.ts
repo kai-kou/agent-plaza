@@ -33,22 +33,45 @@
  * MUST pass one shared ThreadSequencer in deps (the Worker entry and the
  * Durable Object both do). Without one, each call falls back to a fresh
  * sequencer and per-thread serialization does not hold.
+ *
+ * Denied posts (FR-53) never reach the ledger, the queue, or the
+ * ordinary doorbell — but they are no longer silent. A denial is
+ * written to the structured console log immediately and, when a denied
+ * log store is wired, to D1 (best-effort: a write failure is logged
+ * and the Slack response stays `{ ok: true, kind: 'denied' }`). When
+ * the denial is a caps (or correction-round) denial addressed by an
+ * explicit mention, and denied-notice ringing is enabled, the doorbell
+ * rings once per accepted -> denied transition for the thread: the
+ * thread flag's history kind, not a counter, decides, so a repeated
+ * denial does not re-ring and an accepted post resets the transition.
+ * `ignored` outcomes (allowlist, own-bot echoes, edits, system
+ * subtypes) are not denials and are never logged here.
  */
 
 import {
   ThreadLedger,
   decideAddressing,
   resolveParticipantId,
+  DEFAULT_LOOP_CAPS,
+  pairKey,
+  type AcceptResult,
+  type AddressingDecision,
   type LedgerEntry,
   type LedgerStore,
   type LoopCaps,
   type MessageEnvelope,
   type Participant,
+  type ThreadLedgerSnapshot,
 } from '@agent-plaza/core';
 import {
   channelLatestThreadId,
   type KvDoorbell,
 } from './kv-doorbell.js';
+import type {
+  DeniedLogRecord,
+  DeniedLogStore,
+  DeniedReasonCode,
+} from './denied-log.js';
 import type { QueueDelivery } from './queue.js';
 import { ThreadSequencer } from './thread-sequencer.js';
 
@@ -59,6 +82,20 @@ export interface SlackEventsDeps {
   participants: Participant[];
   caps?: LoopCaps;
   sequencer?: ThreadSequencer;
+  /**
+   * Denied-log store (FR-53). When absent, denials are still written
+   * to the structured console log but have no durable record; the
+   * Worker entry always wires the D1 store.
+   */
+  deniedLog?: DeniedLogStore;
+  /**
+   * Stage gate for the denied-notice doorbell (FR-53). Defaults to
+   * false (stage 1: log only) so a deployment can verify denied
+   * logging against real threads before any denied-notice rings.
+   * Set true (stage 2) only once that logging checks out. The Worker
+   * entry reads this from the DENIED_NOTICE_ENABLED var ("true").
+   */
+  deniedNoticeEnabled?: boolean;
   /**
    * Channel allowlist (FR-1, D-9). When set, events from any other
    * channel are ignored before the ledger is touched; an empty list
@@ -355,9 +392,20 @@ async function processMessage(
 
   const accept = ledger.accept(candidate);
   if (!accept.accepted) {
-    const reason =
+    const responseReason =
       accept.reason ?? accept.errors?.join('; ') ?? 'not accepted';
-    return { kind: 'denied', reason };
+    await recordDenial(deps, {
+      threadId: ctx.threadId,
+      channel: ctx.channel,
+      eventId: ctx.eventId,
+      slackTs: ctx.ts,
+      senderId,
+      accept,
+      decision,
+      ledger,
+      bodySha256: candidate.bodySha256,
+    });
+    return { kind: 'denied', reason: responseReason };
   }
 
   const entry = accept.entry;
@@ -383,6 +431,220 @@ async function processMessage(
   await deps.doorbell.ring(channelLatestThreadId(ctx.channel), ctx.eventId);
 
   return { kind: accept.duplicate ? 'duplicate' : 'accepted', entry: advanced.entry };
+}
+
+/**
+ * Denied reasons that may ring a denied-notice (FR-53): the loop caps
+ * and the correction-round cap. Every other denial (validation,
+ * unregistered sender, duplicate, unknown correction target) is
+ * logged only — its addressing is either untrustworthy or its remedy
+ * is not a wake-up.
+ */
+const NOTICE_ELIGIBLE_REASONS: ReadonlySet<string> = new Set([
+  'thread_cap',
+  'per_agent_cap',
+  'consecutive_cap',
+  'pair_roundtrip_cap',
+  'same_content_cap',
+  'correction_round_cap',
+]);
+
+/**
+ * Summarize a ledger rejection into a stable denied reason code. A
+ * loop/correction reason passes through unchanged; the variable-length
+ * validation error strings are classified so the log stays countable
+ * (the full error text is never stored).
+ */
+function summarizeDeniedReason(
+  accept: Extract<AcceptResult, { accepted: false }>,
+): DeniedReasonCode {
+  if (accept.reason !== undefined) return accept.reason;
+  const errors = accept.errors ?? [];
+  if (errors.some((e) => e.includes('is not a registered participant'))) {
+    return 'unregistered_sender';
+  }
+  if (errors.some((e) => e.includes('is already accepted'))) {
+    return 'duplicate_message';
+  }
+  if (errors.some((e) => e.includes('does not match an accepted message'))) {
+    return 'invalid_correction_target';
+  }
+  return 'validation_error';
+}
+
+/**
+ * The cap value actually reached and its limit for a denied reason,
+ * read from the ledger snapshot (which a denial leaves untouched).
+ * Only the numeric value is returned — for same_content_cap the body
+ * hash itself is never carried into the log, only its occurrence
+ * count. For correction_round_cap the ingress carries no correction
+ * target (accept is called without correctsMessageId, so this reason
+ * cannot occur via Slack ingress today); only the limit is known, and
+ * the actual value is null rather than guessed.
+ *
+ * Exported for unit tests: the mapping is pure, and the
+ * correction-round case in particular cannot be driven through Slack
+ * ingress, so its { actual: null, limit } shape is pinned directly.
+ */
+export function capsForDeniedReason(
+  reason: DeniedReasonCode,
+  snapshot: ThreadLedgerSnapshot,
+  senderId: string,
+  decision: AddressingDecision,
+  bodySha256: string,
+  caps: LoopCaps,
+): { actual: number | null; limit: number | null } {
+  const activity = snapshot.activity;
+  switch (reason) {
+    case 'thread_cap':
+      return { actual: activity.totalAgentMessages, limit: caps.maxThreadMessages };
+    case 'per_agent_cap':
+      return {
+        actual: activity.perAgentCounts[senderId] ?? 0,
+        limit: caps.maxPerAgent,
+      };
+    case 'consecutive_cap':
+      return {
+        actual: activity.consecutiveByLastSender,
+        limit: caps.maxConsecutiveByAgent,
+      };
+    case 'pair_roundtrip_cap':
+      return {
+        actual:
+          decision.recipients.length === 1
+            ? (activity.pairExchanges[pairKey(senderId, decision.recipients[0]!)] ?? 0)
+            : null,
+        limit: caps.maxPairRoundTrips,
+      };
+    case 'same_content_cap':
+      return {
+        actual: activity.contentOccurrences[bodySha256] ?? 0,
+        limit: caps.maxSameContent,
+      };
+    case 'correction_round_cap':
+      return { actual: null, limit: caps.maxCorrectionRounds };
+    default:
+      return { actual: null, limit: null };
+  }
+}
+
+interface DenialInput {
+  threadId: string;
+  channel: string;
+  eventId: string;
+  slackTs: string;
+  senderId: string;
+  accept: Extract<AcceptResult, { accepted: false }>;
+  decision: AddressingDecision;
+  ledger: ThreadLedger;
+  bodySha256: string;
+}
+
+/**
+ * Record one denial (FR-53) and, when eligible and enabled, ring its
+ * denied-notice. Order matters: the notice decision is made first so
+ * the log row can record whether a notice rang. A denial advances no
+ * ledger counter, so a denied-notice can never chain: while the thread
+ * stays denied the history's latest entry stays a denied-notice and no
+ * further ring happens, and only an accepted post resets it.
+ *
+ * The console log and the D1 row carry the same fields and neither
+ * carries the post body, the body hash, a secret, or a raw Slack user
+ * id — the sender is the normalized participant id.
+ *
+ * Ring order matters for partial failure (see the ring block below):
+ * the channel pointer rings first and the thread flag second, so a
+ * failure of either ring leaves the transition latch unconsumed and
+ * the next denial retries the notice. `noticeRung` means both rings
+ * succeeded.
+ */
+async function recordDenial(
+  deps: SlackEventsDeps,
+  input: DenialInput,
+): Promise<void> {
+  const reason = summarizeDeniedReason(input.accept);
+  const caps = deps.caps ?? DEFAULT_LOOP_CAPS;
+  const { actual, limit } = capsForDeniedReason(
+    reason,
+    input.ledger.snapshot(),
+    input.senderId,
+    input.decision,
+    input.bodySha256,
+    caps,
+  );
+  let noticeRung = false;
+  if (
+    deps.deniedNoticeEnabled === true &&
+    NOTICE_ELIGIBLE_REASONS.has(reason) &&
+    input.decision.basis === 'mention' &&
+    input.decision.recipients.length > 0
+  ) {
+    try {
+      const lastKind = await deps.doorbell.lastKind(input.threadId);
+      if (lastKind !== 'denied-notice') {
+        // Ring the channel pointer FIRST, then the thread flag. The
+        // thread flag's history is the transition latch: it is only
+        // consumed once the thread-flag ring succeeds. If the channel
+        // ring fails, the exception aborts before the latch moves, so
+        // the next denial retries the whole notice. If the thread-flag
+        // ring fails after the channel ring, the latch is likewise
+        // untouched, and the retry's duplicate channel ring is a
+        // harmless extra wake (design §5.3). The previous order
+        // (thread flag first) lost the wake in exactly this partial
+        // failure: the latch was consumed while the channel pointer
+        // — the key Tier-C hooks poll — never moved.
+        // Move the channel pointer too: Tier-C hooks poll one key per
+        // channel, so a thread-flag-only ring would not wake them.
+        await deps.doorbell.ring(
+          channelLatestThreadId(input.channel),
+          input.eventId,
+          'denied-notice',
+        );
+        await deps.doorbell.ring(input.threadId, input.eventId, 'denied-notice');
+        // noticeRung means both rings succeeded: a partial failure
+        // leaves it false even when the channel pointer already moved,
+        // so the log never claims a notice the latch did not record.
+        noticeRung = true;
+      }
+    } catch {
+      // Best-effort like the D1 write below: a doorbell failure must
+      // not turn a denial into a Slack error. The log row records
+      // noticeRung false, and this line marks the missed notice.
+      console.error(
+        'denied-notice ring failed',
+        input.threadId,
+        input.eventId,
+      );
+    }
+  }
+  const record: DeniedLogRecord = {
+    threadId: input.threadId,
+    eventId: input.eventId,
+    slackTs: input.slackTs,
+    recordedAt: new Date().toISOString(),
+    senderId: input.senderId,
+    reason,
+    capsActual: actual,
+    capsLimit: limit,
+    addressingBasis: input.decision.basis,
+    recipients: [...input.decision.recipients],
+    noticeRung,
+  };
+  console.log(JSON.stringify({ type: 'denied', ...record }));
+  if (deps.deniedLog !== undefined) {
+    try {
+      await deps.deniedLog.record(record);
+    } catch {
+      // Best-effort: a denied-log failure must not break the Slack
+      // response. The console log above already holds the record, and
+      // this error line marks the durable copy as missing.
+      console.error(
+        'denied_log write failed',
+        input.threadId,
+        input.eventId,
+      );
+    }
+  }
 }
 
 function hopCountFor(
