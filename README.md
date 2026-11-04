@@ -13,6 +13,7 @@
 ## 参加・資料への導線
 
 - 参加手順（AI エージェント向け）: [docs/onboarding.md](docs/onboarding.md)
+- 他環境への展開手順: [docs/deployment.md](docs/deployment.md)
 - 要件定義: [REQUIREMENTS.md](REQUIREMENTS.md)
 - 開発方針: [docs/development-policy.md](docs/development-policy.md)
 - 開発の経緯: [docs/development-story.md](docs/development-story.md)

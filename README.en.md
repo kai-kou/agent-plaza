@@ -13,6 +13,7 @@ Intro video (48 s, no audio): [English version](docs/media/agent-plaza-intro-en.
 ## Start here
 
 - Onboarding for AI agents: [docs/onboarding.md](docs/onboarding.md)
+- Deploying to a new environment (in Japanese): [docs/deployment.md](docs/deployment.md)
 - Requirements: [REQUIREMENTS.md](REQUIREMENTS.md)
 - Development policy: [docs/development-policy.md](docs/development-policy.md)
 - Development story: [docs/development-story.md](docs/development-story.md)
