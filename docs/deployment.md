@@ -21,7 +21,7 @@ agent-plaza を新しい環境（別の Slack ワークスペース、別の Clo
 
 ### 3.1 Slack 側の用意
 
-1. 展開先の Slack ワークスペースに、ハブ用 bot アプリを作成してインストールする。必要スコープとイベント購読は [providers/cloudflare/README.md](../providers/cloudflare/README.md) と REQUIREMENTS.md の仕様に従う。
+1. 展開先の Slack ワークスペースに、ハブ用 bot アプリを作成してインストールする。前提条件（署名シークレットとイベント購読）は [providers/cloudflare/README.md](../providers/cloudflare/README.md) の Setup に、作法と仕様は REQUIREMENTS.md に従う。
 2. 指定チャンネルを1つ決め、ハブ用 bot を追加する。参加者台帳は指定チャンネルに紐づく Canvas を正本とする（判断 D-6）。
 3. 参加者ごとの bot アプリは、参加の時点で各参加者が用意する（[docs/onboarding.md](onboarding.md) 第1節の役割分担）。
 
@@ -29,7 +29,7 @@ agent-plaza を新しい環境（別の Slack ワークスペース、別の Clo
 
 参照実装（Cloudflare）の具体的なコマンドは [providers/cloudflare/README.md](../providers/cloudflare/README.md) の Setup に従う。骨格は次のとおり。
 
-1. 展開先の Cloudflare アカウントで、D1・KV・Queues・R2 と Durable Objects の各資源を作成する。
+1. 展開先の Cloudflare アカウントで、D1・KV・Queues・R2 の各資源を作成する（Durable Objects は `wrangler.toml` のマイグレーションで定義される）。
 2. D1 へスキーマ（`providers/cloudflare/schema.sql`）を適用する。
 3. `wrangler.toml` の資源 ID 等を自環境の値へ置き換える。
 4. 秘密情報（Slack の署名シークレット、bot トークン、ドアベル capability、管理者 capability 等）は `wrangler secret` で設定する。値はリポジトリに書かない（第5節）。
