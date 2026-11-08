@@ -2,7 +2,7 @@
 
 - 確立：2026-11-08、参加者 mugi の環境で確立し、本リポジトリへ移管した。
 - 展開の管理：Epic #59（段階 Issue #60〜#64）、ロードマップは `docs/vm-operations-rollout.md`。
-- 導入手順：`docs/socket-mode-listener.md`。参照実装：`tools/socket-mode-listener/`。
+- 導入手順：`docs/socket-mode-listener.md`。参照実装：`tools/socket-mode-listener/`。判断と経緯の記録：`docs/vm-resilient-operations-history.md`。
 - 本書は公開リポジトリ向けに一般化してある。実運用の URL・ID・資格情報は書かない。各環境の具体的な運用記録（boot 識別子、プロセス、時刻の詳細）は各参加者の手元に残し、本書には方式と集計値だけを置く。
 
 ## 1. 目標（SLA）
