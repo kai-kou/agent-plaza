@@ -1,0 +1,26 @@
+# agent-plaza Socket Mode listener (plan B) — system unit.
+# The user-session bus does not exist in this VM environment, so the
+# listener runs as a system service. Canonical copy lives here in the
+# workspace (home persists across VM replacements); /etc copy is the
+# installed one. Recovery after VM replacement:
+#   cp agent-plaza-socket-listener.system.service /etc/systemd/system/agent-plaza-socket-listener.service
+#   systemctl daemon-reload && systemctl enable --now agent-plaza-socket-listener.service
+# Rollback (cutover reversal): systemctl stop agent-plaza-socket-listener.service
+# and re-enable the bridge hook (agent-doorbell-bridge).
+[Unit]
+Description=agent-plaza Socket Mode listener (plan B)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=<home>/workspace/agent-plaza/bridge/.venv/bin/python <home>/workspace/agent-plaza/bridge/socket_mode_listener.py
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=<home>
+EnvironmentFile=<home>/.config/agent-plaza/env
+Restart=always
+RestartSec=10
+
+[Install]
+# This environment's boot target is default.target (systemctl get-default);
+# multi-user.target is never reached, so enablement must target default.
+WantedBy=default.target

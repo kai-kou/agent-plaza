@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "vm-boot-history",
+  "enabled": true,
+  "script_path": "~/hooks/scripts/vm-boot-history.sh",
+  "prompt": "このフック（vm-boot-history）は通常 wake しません。万一 wake した場合は ~/workspace/agent-plaza/bridge/boot-history.jsonl の末尾数行を読み、記録された boot_id と btime を所有者へ簡潔に報告してください。それ以外の作業は不要です。",
+  "poll_interval_secs": 60,
+  "script_timeout_secs": 600,
+  "delivery": {
+    "surface": "main"
+  },
+  "presentation_locale": "ja-JP",
+  "created_at_ms": 1794110539800,
+  "updated_at_ms": 1794110559738
+}
