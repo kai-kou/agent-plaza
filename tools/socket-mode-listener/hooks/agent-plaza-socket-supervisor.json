@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "id": "agent-plaza-socket-supervisor",
+  "enabled": true,
+  "script_path": "~/hooks/scripts/agent-plaza-socket-supervisor.sh",
+  "prompt": "Socket Mode リスナーのスーパーバイザフックからの起床です。wake の理由と payload（フリーズしたプロセスの pid と heartbeat の途絶秒数、または起動失敗の累計）を確認し、~/workspace/agent-plaza/bridge/socket-diagnostics.jsonl と socket-heartbeat.json を読み戻して現在の状態（リスナーが復旧して heartbeat が新鮮か、is_connected が true か）を検証してください。復旧していれば、その旨と経緯を所有者へ報告してください。復旧していない場合は、kai-kou/agent-plaza の docs/vm-resilient-operations.md にある運用方式を踏まえて原因を切り分け、承認境界の範囲で対処し、結果を所有者へ報告してください。",
+  "poll_interval_secs": 5,
+  "script_timeout_secs": 600,
+  "delivery": {
+    "surface": "main"
+  },
+  "presentation_locale": "ja-JP",
+  "created_at_ms": 1794033170329,
+  "updated_at_ms": 1794033339397
+}
