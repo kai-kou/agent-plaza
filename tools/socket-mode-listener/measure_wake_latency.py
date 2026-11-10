@@ -17,8 +17,19 @@ Definitions (all derived from existing home-persisted logs, read-only):
   session that was already awake; they are reported as coverage, not as
   latency samples.
 
-Usage: measure_wake_latency.py [--since-hours N] [--out PATH]
+Usage: measure_wake_latency.py [--since-hours N] [--since ISO --until ISO]
+       [--slack-since ISO] [--out PATH]
 Writes a JSON summary (stdout, and to --out when given).
+
+Interval options (absolute, reproducible):
+- --since / --until bound the aggregation window on observation time
+  (events by observed_at, wakes by started_at), the absolute form of
+  --since-hours. Mutually exclusive with --since-hours.
+- --slack-since bounds the steady-state subset on post time (slack_ts):
+  when given, the output gains a "steady" section aggregating only the
+  events in the window whose slack_ts is at or after the given time
+  (e.g. the moment a structural fix was applied). The 24h verdict and
+  the default output are unchanged when no interval option is given.
 """
 
 import argparse
@@ -78,14 +89,54 @@ def summarize(values):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--since-hours", type=float, default=None)
+    ap.add_argument(
+        "--since",
+        default=None,
+        help="absolute window start (ISO8601) on observation time",
+    )
+    ap.add_argument(
+        "--until",
+        default=None,
+        help="absolute window end, exclusive (ISO8601) on observation time",
+    )
+    ap.add_argument(
+        "--slack-since",
+        default=None,
+        help="steady subset: only events posted (slack_ts) at or after ISO8601",
+    )
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
+
+    if args.since_hours is not None and (
+        args.since is not None or args.until is not None
+    ):
+        ap.error("--since-hours cannot be combined with --since/--until")
 
     cutoff = None
     if args.since_hours is not None:
         cutoff = datetime.datetime.now(datetime.timezone.utc).timestamp() - (
             args.since_hours * 3600
         )
+    window_low = parse_ts(args.since) if args.since is not None else None
+    window_high = parse_ts(args.until) if args.until is not None else None
+    if (
+        window_low is not None
+        and window_high is not None
+        and window_high <= window_low
+    ):
+        ap.error("--until must be after --since")
+    slack_since = (
+        parse_ts(args.slack_since) if args.slack_since is not None else None
+    )
+
+    def in_window(ts):
+        if cutoff is not None and ts < cutoff:
+            return False
+        if window_low is not None and ts < window_low:
+            return False
+        if window_high is not None and ts >= window_high:
+            return False
+        return True
 
     events = []
     with open(OBS) as fh:
@@ -100,7 +151,7 @@ def main():
             observed = parse_ts(rec.get("observed_at"))
             if slack_ts is None or observed is None:
                 continue
-            if cutoff is not None and observed < cutoff:
+            if not in_window(observed):
                 continue
             events.append(
                 {
@@ -123,7 +174,7 @@ def main():
             if rec.get("outcome") != "wake":
                 continue
             started = rec.get("started_at_ms", 0) / 1000.0
-            if cutoff is not None and started < cutoff:
+            if not in_window(started):
                 continue
             ids = set()
             payload = rec.get("payload") or {}
@@ -160,14 +211,9 @@ def main():
                 ev["wake"] = wake["started"]
         prev_started = wake["started"]
 
-    result = {"target_secs": TARGET_SECS, "events_posted": len(events)}
-    for label, subset in (
-        ("all", events),
-        ("bridge", [e for e in events if e["source"] == "bridge"]),
-        ("socket-mode", [e for e in events if e["source"] == "socket-mode"]),
-    ):
+    def aggregate(subset):
         with_wake = [e for e in subset if e["wake"] is not None]
-        result[label] = {
+        return {
             "posted": len(subset),
             "with_wake": len(with_wake),
             "detection": summarize([e["observed"] - e["slack_ts"] for e in subset]),
@@ -175,6 +221,25 @@ def main():
                 [e["wake"] - e["slack_ts"] for e in with_wake]
             ),
         }
+
+    result = {"target_secs": TARGET_SECS, "events_posted": len(events)}
+    if window_low is not None or window_high is not None:
+        window = {}
+        if window_low is not None:
+            window["since"] = args.since
+        if window_high is not None:
+            window["until"] = args.until
+        result["window"] = window
+    for label, subset in (
+        ("all", events),
+        ("bridge", [e for e in events if e["source"] == "bridge"]),
+        ("socket-mode", [e for e in events if e["source"] == "socket-mode"]),
+    ):
+        result[label] = aggregate(subset)
+    if slack_since is not None:
+        steady = [e for e in events if e["slack_ts"] >= slack_since]
+        result["steady"] = aggregate(steady)
+        result["steady"]["slack_since"] = args.slack_since
 
     text = json.dumps(result, indent=2, ensure_ascii=False)
     print(text)
