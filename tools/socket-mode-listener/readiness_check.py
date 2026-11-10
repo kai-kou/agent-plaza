@@ -10,11 +10,15 @@ in its established configuration:
 5. supervisor carries the start-time guard and the 45s stale threshold;
    the listener watchdog is 45s (configuration drift check).
 6. attributed wake latency over the last 24h is within the 60s target.
+   With --steady-since ISO, the same run also shows the steady-state
+   breakdown (posts at or after ISO) next to the 24h verdict; the
+   verdict itself stays 24h-based (the steady figures are informational
+   and can be copied into the daily log as-is).
 
 Informational: whether the legacy systemd unit exists under /etc (the
 method must not depend on it; absence is the expected state).
 
-Usage: readiness_check.py [--json]
+Usage: readiness_check.py [--json] [--steady-since ISO]
 Exit code 0 when every critical check passes.
 """
 
@@ -34,6 +38,11 @@ def check(name, ok, detail, critical=True):
 
 def main():
     as_json = "--json" in sys.argv
+    steady_since = None
+    if "--steady-since" in sys.argv:
+        idx = sys.argv.index("--steady-since")
+        if idx + 1 < len(sys.argv):
+            steady_since = sys.argv[idx + 1]
     results = []
 
     # 1. boot history covers the current boot
@@ -126,8 +135,16 @@ def main():
     # 6. wake latency over the last 24h (attributed wakes)
     lat_ok, lat_detail = False, "analyzer failed"
     try:
+        cmd = [
+            "python3",
+            BRIDGE + "/measure_wake_latency.py",
+            "--since-hours",
+            "24",
+        ]
+        if steady_since is not None:
+            cmd += ["--slack-since", steady_since]
         out = subprocess.run(
-            ["python3", BRIDGE + "/measure_wake_latency.py", "--since-hours", "24"],
+            cmd,
             capture_output=True,
             text=True,
             timeout=60,
@@ -146,6 +163,20 @@ def main():
         else:
             lat_detail = "no attributed wakes in 24h"
             lat_ok = True  # nothing to violate; not a failure of the path
+        steady = summary.get("steady")
+        if steady is not None:
+            swl = steady.get("wake_latency") or {}
+            lat_detail += (
+                " | steady since %s: n=%s median=%ss max=%ss within60=%s%%"
+                " (informational; verdict stays 24h-based)"
+                % (
+                    steady.get("slack_since"),
+                    swl.get("n"),
+                    swl.get("median"),
+                    swl.get("max"),
+                    swl.get("within_target_pct"),
+                )
+            )
     except Exception as exc:  # noqa: BLE001
         lat_detail = "error: %s" % exc
     results.append(check("wake latency 24h within 60s target", lat_ok, lat_detail))
