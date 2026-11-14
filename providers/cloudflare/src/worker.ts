@@ -9,9 +9,7 @@
  *                       a secret: either the shared DOORBELL_CAPABILITY
  *                       or a per-participant value from
  *                       DOORBELL_CAPABILITIES_JSON (issued per reader,
- *                       SEC-2), or a dedicated per-participant secret
- *                       binding such as DOORBELL_CAPABILITY_SIRO
- *                       (separated from the JSON map); the route is
+ *                       SEC-2); the route is
  *                       disabled when it is not configured or is shorter
  *                       than MIN_DOORBELL_CAPABILITY_LENGTH. It returns
  *                       only the flag ({eventId, ts}) or {flag: null} —
@@ -171,14 +169,6 @@ export interface EnvBindings {
    * malformed entries fail startup (see resolveDoorbellCapabilities).
    */
   DOORBELL_CAPABILITIES_JSON?: string;
-  /**
-   * Dedicated doorbell capability for agent:siro, kept in a separate
-   * secret binding instead of DOORBELL_CAPABILITIES_JSON so it can be
-   * issued or rotated without recomposing the JSON map. A secret like
-   * DOORBELL_CAPABILITY; a configured-but-too-short or duplicate value
-   * fails startup (see resolveDoorbellCapabilities).
-   */
-  DOORBELL_CAPABILITY_SIRO?: string;
   /**
    * Per-participant exchange capabilities as a JSON object mapping
    * participant id to capability, issued per participant like the
@@ -372,24 +362,20 @@ export const MIN_DOORBELL_CAPABILITY_LENGTH = 16;
 
 /**
  * Resolve the effective doorbell capabilities from the configuration
- * sources — the shared DOORBELL_CAPABILITY, the per-participant
- * DOORBELL_CAPABILITIES_JSON map, and dedicated per-participant
- * secret bindings passed as a participant id to value map (SEC-2:
- * capabilities are issued per target) — keeping the mapping from
- * each capability value to the participant it was issued to. The
- * shared capability maps to null: it belongs to no single
- * participant and reads every key. A dedicated binding is kept
- * separate from the JSON map so that reader's capability can be
- * issued or rotated without recomposing the map. The shared value
- * keeps the legacy semantics (unset, empty, or shorter than MIN
- * means not configured). The map is operator-maintained
+ * sources — the shared DOORBELL_CAPABILITY and the per-participant
+ * DOORBELL_CAPABILITIES_JSON map (SEC-2: capabilities are issued per
+ * target) — keeping the mapping from each capability value to the
+ * participant it was issued to. The shared capability maps to null:
+ * it belongs to no single participant and reads every key. The map
+ * key is the participant id exactly as it appears in the
+ * per-participant pointer, so the operator writes the scoped id
+ * literally instead of relying on a naming convention. The shared
+ * value keeps the legacy semantics (unset, empty, or shorter than
+ * MIN means not configured). The map is operator-maintained
  * configuration, so malformed entries — bad JSON, a non-object, an
  * empty participant id, a non-string or too-short value, or a value
  * duplicating another capability — throw instead of silently
- * weakening the route (fail-closed). Dedicated values follow the
- * same fail-closed rule: unset or empty means not configured, but a
- * configured value that is too short or duplicates another
- * capability throws.
+ * weakening the route (fail-closed).
  *
  * The mapping is what the participant doorbell (D-22) scopes the
  * read route with: a per-participant capability serves only its own
@@ -398,7 +384,6 @@ export const MIN_DOORBELL_CAPABILITY_LENGTH = 16;
 export function resolveDoorbellCapabilityOwners(
   shared: string | undefined,
   perParticipantJson: string | undefined,
-  dedicated: Readonly<Record<string, string | undefined>> = {},
 ): Map<string, string | null> {
   const owners = new Map<string, string | null>();
   if (
@@ -445,25 +430,6 @@ export function resolveDoorbellCapabilityOwners(
       owners.set(value, participantId);
     }
   }
-  for (const [participantId, value] of Object.entries(dedicated)) {
-    if (participantId === '') {
-      throw new Error('Dedicated doorbell capability has an empty participant id');
-    }
-    if (value === undefined || value === '') {
-      continue;
-    }
-    if (value.length < MIN_DOORBELL_CAPABILITY_LENGTH) {
-      throw new Error(
-        `Dedicated doorbell capability for ${participantId} must be at least ${MIN_DOORBELL_CAPABILITY_LENGTH} characters`,
-      );
-    }
-    if (owners.has(value)) {
-      throw new Error(
-        'Dedicated doorbell capability values must be unique and differ from DOORBELL_CAPABILITY and DOORBELL_CAPABILITIES_JSON',
-      );
-    }
-    owners.set(value, participantId);
-  }
   return owners;
 }
 
@@ -477,11 +443,9 @@ export function resolveDoorbellCapabilityOwners(
 export function resolveDoorbellCapabilities(
   shared: string | undefined,
   perParticipantJson: string | undefined,
-  dedicated: Readonly<Record<string, string | undefined>> = {},
 ): Set<string> {
   return new Set(
-    resolveDoorbellCapabilityOwners(shared, perParticipantJson, dedicated)
-      .keys(),
+    resolveDoorbellCapabilityOwners(shared, perParticipantJson).keys(),
   );
 }
 
@@ -922,12 +886,10 @@ export function createAppFromEnv(env: EnvBindings): Hono {
   const doorbellCapabilities = resolveDoorbellCapabilities(
     env.DOORBELL_CAPABILITY,
     env.DOORBELL_CAPABILITIES_JSON,
-    { 'agent:siro': env.DOORBELL_CAPABILITY_SIRO },
   );
   const doorbellCapabilityOwners = resolveDoorbellCapabilityOwners(
     env.DOORBELL_CAPABILITY,
     env.DOORBELL_CAPABILITIES_JSON,
-    { 'agent:siro': env.DOORBELL_CAPABILITY_SIRO },
   );
   const exchangeCapabilities = resolveExchangeCapabilities(
     env.EXCHANGE_CAPABILITIES_JSON,

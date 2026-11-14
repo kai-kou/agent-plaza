@@ -404,15 +404,17 @@ describe('worker app (doorbell read route)', () => {
     expect(await wrong.json()).toEqual({ error: 'not found' });
   });
 
-  it('serves the flag through the dedicated siro capability alongside the shared and JSON capabilities', async () => {
+  it('serves the flag through per-participant JSON capabilities alongside the shared capability', async () => {
     const CAP2 = 'mugi-capability-0123456789abcdef';
-    const CAP3 = 'siro-capability-0123456789abcdef';
+    const CAP3 = 'third-capability-0123456789abcdef';
     const { env, kv } = makeEnv(false);
     env.DOORBELL_CAPABILITY = CAP;
-    // The JSON map intentionally has no agent:siro entry: the
-    // dedicated binding must be effective without recomposing it.
-    env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'agent:mugi': CAP2 });
-    env.DOORBELL_CAPABILITY_SIRO = CAP3;
+    // Every per-participant capability lives in the one JSON map,
+    // keyed by participant id (SEC-2).
+    env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({
+      'agent:mugi': CAP2,
+      'agent:third': CAP3,
+    });
     kv.data.set(
       `doorbell:${THREAD}`,
       JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
@@ -432,10 +434,10 @@ describe('worker app (doorbell read route)', () => {
     expect(await wrong.json()).toEqual({ error: 'not found' });
   });
 
-  it('serves the flag through the dedicated siro capability in the header forms', async () => {
-    const CAP3 = 'siro-capability-0123456789abcdef';
+  it('serves the flag through a per-participant JSON capability in the header forms', async () => {
+    const CAP3 = 'third-capability-0123456789abcdef';
     const { env, kv } = makeEnv(false);
-    env.DOORBELL_CAPABILITY_SIRO = CAP3;
+    env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'agent:third': CAP3 });
     kv.data.set(
       `doorbell:${THREAD}`,
       JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
@@ -463,68 +465,85 @@ describe('worker app (doorbell read route)', () => {
     expect(await wrong.json()).toEqual({ error: 'not found' });
   });
 
-  it('rejects a too-short or duplicate dedicated capability at startup', () => {
+  it('ignores a legacy dedicated doorbell capability binding', async () => {
     const CAP2 = 'mugi-capability-0123456789abcdef';
-    const cases: string[] = [
-      'short',
-      // Duplicating the shared capability.
-      CAP,
-      // Duplicating a per-participant JSON capability.
-      CAP2,
-    ];
-    for (const dedicated of cases) {
-      const { env } = makeEnv(false);
-      env.DOORBELL_CAPABILITY = CAP;
-      env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'agent:mugi': CAP2 });
-      env.DOORBELL_CAPABILITY_SIRO = dedicated;
-      expect(() => createAppFromEnv(env)).toThrow();
-    }
+    const CAP3 = 'third-capability-0123456789abcdef';
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'agent:mugi': CAP2 });
+    // A deployment still carrying a dedicated per-participant secret
+    // binding from before the JSON unification: the binding is not
+    // read anymore, so its value must not take effect, and its
+    // presence must not disturb the configured capabilities.
+    (env as unknown as Record<string, unknown>).DOORBELL_CAPABILITY_DEDICATED =
+      CAP3;
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+    expect((await app.request(doorbellUrl(CAP, THREAD))).status).toBe(200);
+    expect((await app.request(doorbellUrl(CAP2, THREAD))).status).toBe(200);
+    expect((await app.request(doorbellUrl(CAP3, THREAD))).status).toBe(404);
   });
 
-  it('leaves the existing capabilities unchanged when the dedicated binding is not configured', async () => {
-    const CAP2 = 'mugi-capability-0123456789abcdef';
-    const CAP3 = 'siro-capability-0123456789abcdef';
-    for (const mode of ['unset', 'empty'] as const) {
-      const { env, kv } = makeEnv(false);
-      env.DOORBELL_CAPABILITY = CAP;
-      env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'agent:mugi': CAP2 });
-      if (mode === 'empty') {
-        env.DOORBELL_CAPABILITY_SIRO = '';
-      }
-      kv.data.set(
-        `doorbell:${THREAD}`,
-        JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
-      );
-      const app = createAppFromEnv(env);
-      expect((await app.request(doorbellUrl(CAP, THREAD))).status).toBe(200);
-      expect((await app.request(doorbellUrl(CAP2, THREAD))).status).toBe(200);
-      expect((await app.request(doorbellUrl(CAP3, THREAD))).status).toBe(404);
-    }
+  it('scopes a per-participant JSON capability to its own participant pointer', async () => {
+    const CAP3 = 'third-capability-0123456789abcdef';
+    const { env, kv } = makeEnv(false);
+    env.DOORBELL_CAPABILITY = CAP;
+    // The map key is the participant id exactly as it appears in the
+    // per-participant pointer (D-22), so the scoping compares equal.
+    env.DOORBELL_CAPABILITIES_JSON = JSON.stringify({ 'slack:U300': CAP3 });
+    const ownPointer = 'C1:__latest__:slack:U300';
+    const otherPointer = 'C1:__latest__:slack:U400';
+    kv.data.set(
+      `doorbell:${ownPointer}`,
+      JSON.stringify({ eventId: 'EvOwn', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    kv.data.set(
+      `doorbell:${otherPointer}`,
+      JSON.stringify({ eventId: 'EvOther', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    kv.data.set(
+      `doorbell:${THREAD}`,
+      JSON.stringify({ eventId: 'Ev1', ts: '2026-10-27T00:00:00.000Z' }),
+    );
+    const app = createAppFromEnv(env);
+    expect((await app.request(doorbellUrl(CAP3, ownPointer))).status).toBe(200);
+    expect((await app.request(doorbellUrl(CAP3, otherPointer))).status).toBe(
+      404,
+    );
+    // Shared keys stay readable with the per-participant capability,
+    // and the shared capability reads participant pointers.
+    expect((await app.request(doorbellUrl(CAP3, THREAD))).status).toBe(200);
+    expect((await app.request(doorbellUrl(CAP, ownPointer))).status).toBe(200);
   });
 
-  it('resolves dedicated capabilities generically and rejects duplicates among them', () => {
+  it('resolves per-participant capabilities from the JSON map and rejects invalid entries', () => {
     const CAP2 = 'mugi-capability-0123456789abcdef';
-    const CAP3 = 'siro-capability-0123456789abcdef';
+    const CAP3 = 'third-capability-0123456789abcdef';
     const resolved = resolveDoorbellCapabilities(
       CAP,
-      JSON.stringify({ 'agent:mugi': CAP2 }),
-      { 'agent:siro': CAP3 },
+      JSON.stringify({ 'agent:mugi': CAP2, 'agent:third': CAP3 }),
     );
     expect(resolved).toEqual(new Set([CAP, CAP2, CAP3]));
-    // Two dedicated values duplicating each other.
+    // Two map entries duplicating each other's value.
     expect(() =>
-      resolveDoorbellCapabilities(CAP, undefined, {
-        'agent:siro': CAP3,
-        'agent:other': CAP3,
-      }),
+      resolveDoorbellCapabilities(
+        CAP,
+        JSON.stringify({ 'agent:mugi': CAP3, 'agent:third': CAP3 }),
+      ),
     ).toThrow();
-    // An empty participant id in the dedicated map.
+    // An empty participant id in the map.
     expect(() =>
-      resolveDoorbellCapabilities(CAP, undefined, { '': CAP3 }),
+      resolveDoorbellCapabilities(CAP, JSON.stringify({ '': CAP3 })),
     ).toThrow();
-    // A dedicated value shorter than the minimum length.
+    // A map value shorter than the minimum length.
     expect(() =>
-      resolveDoorbellCapabilities(CAP, undefined, { 'agent:siro': 'short' }),
+      resolveDoorbellCapabilities(
+        CAP,
+        JSON.stringify({ 'agent:third': 'short' }),
+      ),
     ).toThrow();
   });
 
