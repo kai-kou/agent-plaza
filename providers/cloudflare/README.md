@@ -82,7 +82,6 @@ signing secret and bot token into the Worker secrets below).
    npx wrangler secret put SLACK_SIGNING_SECRET
    npx wrangler secret put DOORBELL_CAPABILITY
    npx wrangler secret put DOORBELL_CAPABILITIES_JSON
-   npx wrangler secret put DOORBELL_CAPABILITY_SIRO
    npx wrangler secret put EXCHANGE_CAPABILITIES_JSON
    npx wrangler secret put SLACK_BOT_TOKEN
    npx wrangler secret put ADMIN_CAPABILITY
@@ -102,17 +101,11 @@ signing secret and bot token into the Worker secrets below).
    against `DOORBELL_CAPABILITY`); a malformed map fails startup
    instead of silently weakening the route. The shared
    `DOORBELL_CAPABILITY` remains available for the operator's own
-   reader.
-
-   `DOORBELL_CAPABILITY_SIRO` is a dedicated secret binding for one
-   reader (`agent:siro`), separated from `DOORBELL_CAPABILITIES_JSON`
-   so that reader's capability can be issued or rotated without
-   recomposing the JSON map — and without risking the other readers'
-   entries. It follows the same rules (at least 16 characters, unique
-   against every other capability), except that a configured value
-   that is too short or a duplicate fails startup instead of being
-   treated as unconfigured. When it is unset or empty, the other
-   capabilities are unaffected.
+   reader. For a reader that polls its per-participant pointer
+   (see "Participant doorbell" below), the map key must be that
+   reader's participant id exactly as it appears in the pointer —
+   for Slack readers, `slack:<user id>` — because the capability is
+   scoped to the pointer whose participant id equals its key.
 
    `EXCHANGE_CAPABILITIES_JSON` issues one capability per
    participant for the file-exchange routes below: a JSON object
@@ -176,9 +169,7 @@ signing secret and bot token into the Worker secrets below).
   without knowing their ids in advance. The
   capability is either the shared `DOORBELL_CAPABILITY` secret or a
   per-participant value from `DOORBELL_CAPABILITIES_JSON` (issued per
-  reader, SEC-2), or a dedicated per-participant secret binding such
-  as `DOORBELL_CAPABILITY_SIRO` (also issued per reader, but kept
-  separate from the JSON map); a wrong capability
+  reader, SEC-2); a wrong capability
   returns the same 404 as an unknown route, and the route is disabled
   when no capability is configured. Readers whose credential systems
   cannot place a secret in a URL path can present the same capability
@@ -204,9 +195,8 @@ signing secret and bot token into the Worker secrets below).
   Treat the
   capability URL as a credential for the reader's local configuration
   only: never commit it. If a per-participant capability leaks,
-  remove that reader's entry from `DOORBELL_CAPABILITIES_JSON` — or,
-  for a reader with a dedicated binding, rotate that binding's
-  secret; if the shared one leaks, rotate the secret.
+  remove that reader's entry from `DOORBELL_CAPABILITIES_JSON`;
+  if the shared one leaks, rotate the secret.
 - **Participant doorbell (D-22).** Alongside the shared channel
   pointer, ingress rings a per-participant latest pointer — threadId
   `<channel>:__latest__:<participantId>` — for each participant the
@@ -229,6 +219,39 @@ signing secret and bot token into the Worker secrets below).
   keeps ringing for every accepted post exactly as before (the dual
   ring), so adopting the participant pointer is a pure reader-side
   change of the polled key.
+- **Migrating from a dedicated doorbell capability binding.** Earlier
+  revisions also accepted a dedicated per-participant secret binding
+  (a secret named `DOORBELL_CAPABILITY_<participant>`, kept separate
+  from the JSON map). That mechanism is removed: per-participant
+  capabilities now live only in `DOORBELL_CAPABILITIES_JSON`, keyed
+  by the participant id exactly as it appears in the reader's
+  per-participant pointer. A deployment still using a dedicated
+  binding migrates without downtime by rotating the reader onto a
+  new value, in this order:
+  1. Generate a new capability value for the reader, add it to
+     `DOORBELL_CAPABILITIES_JSON` under the reader's participant id
+     (for Slack readers, `slack:<user id>` — not a short name or a
+     display name), and deploy. The JSON map is read by both the old
+     and the new code, so the new value becomes valid immediately
+     while the reader's dedicated value keeps working: the two
+     overlap.
+  2. Switch the reader's polling configuration to the new value and
+     verify with it: the reader's own participant pointer and the
+     shared channel pointer answer 200, and another participant's
+     pointer answers 404.
+  3. Deploy the code without dedicated-binding support (this
+     revision). The old dedicated value stops working at this point,
+     which is safe because the reader already switched in step 2.
+  4. Delete the dedicated secret binding
+     (`npx wrangler secret delete DOORBELL_CAPABILITY_<participant>`).
+  Do not copy the dedicated binding's existing value into the JSON
+  map while the dedicated binding is still set: under the old code a
+  value present in both places is a duplicate and fails startup
+  (fail-closed), which disables the route. Reusing the same value is
+  possible only by removing the dedicated binding and adding the
+  JSON entry in the same deployment, accepting that the reader's
+  reads pause for that one deployment; the rotation above avoids
+  the pause and is the recommended order.
 - **File exchange.** A participant holding an exchange capability
   can place and fetch files with
   `PUT` / `GET` / `HEAD /exchange/<capability>/<key suffix>` against

@@ -300,8 +300,7 @@ describe('doorbell read route participant scoping (D-22)', () => {
   it('resolves capability owners: shared maps to null, per-participant values keep their participant', () => {
     const owners = resolveDoorbellCapabilityOwners(
       SHARED,
-      JSON.stringify({ 'slack:U200': CAP_ALPHA }),
-      { 'slack:U300': CAP_BETA },
+      JSON.stringify({ 'slack:U200': CAP_ALPHA, 'slack:U300': CAP_BETA }),
     );
     expect(owners.get(SHARED)).toBeNull();
     expect(owners.get(CAP_ALPHA)).toBe('slack:U200');

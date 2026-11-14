@@ -3,10 +3,8 @@
 # setup commands in README.md. No secrets live in this file; the Slack
 # signing secret is set with `wrangler secret put SLACK_SIGNING_SECRET`
 # and the doorbell read capabilities with
-# `wrangler secret put DOORBELL_CAPABILITY`,
-# `wrangler secret put DOORBELL_CAPABILITIES_JSON`, and
-# `wrangler secret put DOORBELL_CAPABILITY_SIRO` (the dedicated
-# capability for agent:siro, kept separate from the JSON map), and the
+# `wrangler secret put DOORBELL_CAPABILITY` and
+# `wrangler secret put DOORBELL_CAPABILITIES_JSON`, and the
 # file-exchange capabilities with
 # `wrangler secret put EXCHANGE_CAPABILITIES_JSON`.
 name = "agent-plaza-hub"
