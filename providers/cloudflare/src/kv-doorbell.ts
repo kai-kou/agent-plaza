@@ -80,6 +80,42 @@ export function channelLatestThreadId(channel: string): string {
   return `${channel}:__latest__`;
 }
 
+/**
+ * The per-participant form of the channel latest-event pointer
+ * (participant doorbell, decision D-22 / FR-6): ingress rings this
+ * pointer only for the participants a post is routed to, so a Tier-C
+ * reader polling its own pointer is woken only by posts addressed to
+ * it (plus the fail-open broadcasts). The value is a synthetic thread
+ * id in the same namespace as the shared pointer, so the existing
+ * flag and history keys, `peek` and `peekSince` all apply unchanged;
+ * the payload stays `{eventId, ts}` — routing information lives only
+ * in which key is rung, never in the payload (FR-8). The participant
+ * suffix cannot collide with a real thread id, whose tail is always a
+ * Slack timestamp, nor with the shared pointer, which has no suffix.
+ */
+export function participantLatestThreadId(
+  channel: string,
+  participantId: string,
+): string {
+  return `${channel}:__latest__:${participantId}`;
+}
+
+/**
+ * The participant a latest-pointer thread id belongs to, or null when
+ * the id is not a participant pointer (the shared pointer, a real
+ * thread id, or a malformed suffix). The read route uses this to scope
+ * a per-participant capability to its own pointer (D-22).
+ */
+export function participantIdFromLatestPointer(
+  threadId: string,
+): string | null {
+  const marker = ':__latest__:';
+  const index = threadId.indexOf(marker);
+  if (index <= 0) return null;
+  const participantId = threadId.slice(index + marker.length);
+  return participantId === '' ? null : participantId;
+}
+
 export class KvDoorbell {
   readonly #kv: KVNamespaceLike;
 

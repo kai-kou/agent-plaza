@@ -23,6 +23,17 @@
  *                       so a reader can detect and recover events whose
  *                       flag it missed. An empty `since` reads from the
  *                       start of the retained history.
+ *                       Participant doorbell (D-22): the threadId may
+ *                       name a per-participant latest pointer
+ *                       (<channel>:__latest__:<participantId>), rung
+ *                       only for posts routed to that participant.
+ *                       When the capability-to-participant mapping is
+ *                       configured, a per-participant capability may
+ *                       read only its own participant pointer (shared
+ *                       keys stay readable during the migration, and
+ *                       the shared capability reads every key); a
+ *                       scope failure is the same indistinguishable
+ *                       404 as a wrong capability.
  * - GET  /doorbell/:threadId
  *                       the header form of the same read route, for
  *                       readers whose credential systems cannot place a
@@ -93,7 +104,11 @@ import { Hono, type Context } from 'hono';
 import type { Participant } from '@agent-plaza/core';
 import { D1LedgerStore, type D1DatabaseLike } from './d1-ledger-store.js';
 import { D1DeniedLogStore } from './denied-log.js';
-import { KvDoorbell, type KVNamespaceLike } from './kv-doorbell.js';
+import {
+  KvDoorbell,
+  participantIdFromLatestPointer,
+  type KVNamespaceLike,
+} from './kv-doorbell.js';
 import {
   MAX_EXCHANGE_OBJECT_SIZE,
   MIN_EXCHANGE_CAPABILITY_LENGTH,
@@ -356,34 +371,41 @@ export function threadIdFromBody(rawBody: string): string | null {
 export const MIN_DOORBELL_CAPABILITY_LENGTH = 16;
 
 /**
- * Resolve the effective set of doorbell capabilities from the
- * configuration sources: the shared DOORBELL_CAPABILITY, the
- * per-participant DOORBELL_CAPABILITIES_JSON map, and dedicated
- * per-participant secret bindings passed as a participant id to
- * value map (SEC-2: capabilities are issued per target). A dedicated
- * binding is kept separate from the JSON map so that reader's
- * capability can be issued or rotated without recomposing the map.
- * The shared value keeps the legacy semantics (unset, empty, or
- * shorter than MIN means not configured). The map is
- * operator-maintained configuration, so malformed entries — bad
- * JSON, a non-object, an empty participant id, a non-string or
- * too-short value, or a value duplicating another capability —
- * throw instead of silently weakening the route (fail-closed).
- * Dedicated values follow the same fail-closed rule: unset or empty
- * means not configured, but a configured value that is too short or
- * duplicates another capability throws.
+ * Resolve the effective doorbell capabilities from the configuration
+ * sources — the shared DOORBELL_CAPABILITY, the per-participant
+ * DOORBELL_CAPABILITIES_JSON map, and dedicated per-participant
+ * secret bindings passed as a participant id to value map (SEC-2:
+ * capabilities are issued per target) — keeping the mapping from
+ * each capability value to the participant it was issued to. The
+ * shared capability maps to null: it belongs to no single
+ * participant and reads every key. A dedicated binding is kept
+ * separate from the JSON map so that reader's capability can be
+ * issued or rotated without recomposing the map. The shared value
+ * keeps the legacy semantics (unset, empty, or shorter than MIN
+ * means not configured). The map is operator-maintained
+ * configuration, so malformed entries — bad JSON, a non-object, an
+ * empty participant id, a non-string or too-short value, or a value
+ * duplicating another capability — throw instead of silently
+ * weakening the route (fail-closed). Dedicated values follow the
+ * same fail-closed rule: unset or empty means not configured, but a
+ * configured value that is too short or duplicates another
+ * capability throws.
+ *
+ * The mapping is what the participant doorbell (D-22) scopes the
+ * read route with: a per-participant capability serves only its own
+ * participant's latest pointer, never another participant's.
  */
-export function resolveDoorbellCapabilities(
+export function resolveDoorbellCapabilityOwners(
   shared: string | undefined,
   perParticipantJson: string | undefined,
   dedicated: Readonly<Record<string, string | undefined>> = {},
-): Set<string> {
-  const capabilities = new Set<string>();
+): Map<string, string | null> {
+  const owners = new Map<string, string | null>();
   if (
     shared !== undefined &&
     shared.length >= MIN_DOORBELL_CAPABILITY_LENGTH
   ) {
-    capabilities.add(shared);
+    owners.set(shared, null);
   }
   if (perParticipantJson !== undefined && perParticipantJson !== '') {
     let parsed: unknown;
@@ -415,12 +437,12 @@ export function resolveDoorbellCapabilities(
           `DOORBELL_CAPABILITIES_JSON capability for ${participantId} must be a string of at least ${MIN_DOORBELL_CAPABILITY_LENGTH} characters`,
         );
       }
-      if (capabilities.has(value)) {
+      if (owners.has(value)) {
         throw new Error(
           'DOORBELL_CAPABILITIES_JSON capability values must be unique and differ from DOORBELL_CAPABILITY',
         );
       }
-      capabilities.add(value);
+      owners.set(value, participantId);
     }
   }
   for (const [participantId, value] of Object.entries(dedicated)) {
@@ -435,14 +457,32 @@ export function resolveDoorbellCapabilities(
         `Dedicated doorbell capability for ${participantId} must be at least ${MIN_DOORBELL_CAPABILITY_LENGTH} characters`,
       );
     }
-    if (capabilities.has(value)) {
+    if (owners.has(value)) {
       throw new Error(
         'Dedicated doorbell capability values must be unique and differ from DOORBELL_CAPABILITY and DOORBELL_CAPABILITIES_JSON',
       );
     }
-    capabilities.add(value);
+    owners.set(value, participantId);
   }
-  return capabilities;
+  return owners;
+}
+
+/**
+ * The effective set of doorbell capability values, without their
+ * participant mapping. Kept for callers that only gate on validity;
+ * the read route itself uses the owners map
+ * ({@link resolveDoorbellCapabilityOwners}) so a per-participant
+ * capability can be scoped to its own participant pointer (D-22).
+ */
+export function resolveDoorbellCapabilities(
+  shared: string | undefined,
+  perParticipantJson: string | undefined,
+  dedicated: Readonly<Record<string, string | undefined>> = {},
+): Set<string> {
+  return new Set(
+    resolveDoorbellCapabilityOwners(shared, perParticipantJson, dedicated)
+      .keys(),
+  );
 }
 
 /**
@@ -491,6 +531,16 @@ export interface WorkerDeps extends SlackEventsDeps {
   signingSecret: string;
   /** Capability segments accepted by the doorbell read route (see EnvBindings). */
   doorbellCapabilities?: ReadonlySet<string>;
+  /**
+   * Capability value -> the participant it was issued to (null for
+   * the shared capability), as resolved by
+   * resolveDoorbellCapabilityOwners. When wired, the doorbell read
+   * route scopes a per-participant capability to that participant's
+   * own latest pointer (D-22); shared keys stay readable by every
+   * capability. When absent, the route keeps the legacy behaviour:
+   * any accepted capability reads any key.
+   */
+  doorbellCapabilityOwners?: ReadonlyMap<string, string | null>;
   /** Bucket for the exchange routes (see EnvBindings). */
   exchangeBucket?: R2BucketLike;
   /**
@@ -528,14 +578,49 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
     deps.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
   // The minimum-length rule holds for any deps source, not only for
   // the env wiring: a shorter value never takes effect (fail-closed).
-  const doorbellCapabilities =
-    deps.doorbellCapabilities === undefined
+  const doorbellCapabilityOwners =
+    deps.doorbellCapabilityOwners === undefined
       ? undefined
-      : new Set(
-          [...deps.doorbellCapabilities].filter(
-            (v) => v.length >= MIN_DOORBELL_CAPABILITY_LENGTH,
+      : new Map(
+          [...deps.doorbellCapabilityOwners].filter(
+            ([v]) => v.length >= MIN_DOORBELL_CAPABILITY_LENGTH,
           ),
         );
+  const doorbellCapabilities =
+    doorbellCapabilityOwners !== undefined
+      ? new Set(doorbellCapabilityOwners.keys())
+      : deps.doorbellCapabilities === undefined
+        ? undefined
+        : new Set(
+            [...deps.doorbellCapabilities].filter(
+              (v) => v.length >= MIN_DOORBELL_CAPABILITY_LENGTH,
+            ),
+          );
+  // Participant scoping for the doorbell read route (D-22): with the
+  // owners map wired, a per-participant capability may read its own
+  // participant latest pointer and — during the migration — every
+  // shared key (thread flags and the shared channel pointer), but
+  // never another participant's pointer. The shared capability
+  // (owner null) reads every key. Without the map, the legacy rule
+  // holds: any accepted capability reads any key. A scope failure is
+  // answered with the same indistinguishable 404 as a wrong
+  // capability, so the route does not reveal which pointers exist.
+  const doorbellAccessAllowed = (
+    capability: string,
+    threadId: string,
+  ): boolean => {
+    if (
+      doorbellCapabilities === undefined ||
+      !doorbellCapabilities.has(capability)
+    ) {
+      return false;
+    }
+    if (doorbellCapabilityOwners === undefined) return true;
+    const owner = doorbellCapabilityOwners.get(capability);
+    if (owner === undefined || owner === null) return true;
+    const target = participantIdFromLatestPointer(threadId);
+    return target === null || target === owner;
+  };
   // The same fail-closed rule as the doorbell capabilities, for any
   // deps source: an exchange capability shorter than the minimum
   // never takes effect.
@@ -579,8 +664,10 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
 
   app.get('/doorbell/:capability/:threadId', async (c) => {
     if (
-      doorbellCapabilities === undefined ||
-      !doorbellCapabilities.has(c.req.param('capability'))
+      !doorbellAccessAllowed(
+        c.req.param('capability'),
+        c.req.param('threadId'),
+      )
     ) {
       return c.json({ error: 'not found' }, 404);
     }
@@ -589,18 +676,17 @@ export function createWorkerApp(deps: WorkerDeps): Hono {
     );
   });
 
-  // Header form of the doorbell read route: same capability set and
-  // the same indistinguishable 404, with the capability presented in
-  // a header instead of the path.
+  // Header form of the doorbell read route: same capability set, the
+  // same participant scoping and the same indistinguishable 404, with
+  // the capability presented in a header instead of the path.
   app.get('/doorbell/:threadId', async (c) => {
     const presented = headerDoorbellCapability(
       c.req.header('authorization'),
       c.req.header('x-capability'),
     );
     if (
-      doorbellCapabilities === undefined ||
       presented === undefined ||
-      !doorbellCapabilities.has(presented)
+      !doorbellAccessAllowed(presented, c.req.param('threadId'))
     ) {
       return c.json({ error: 'not found' }, 404);
     }
@@ -838,6 +924,11 @@ export function createAppFromEnv(env: EnvBindings): Hono {
     env.DOORBELL_CAPABILITIES_JSON,
     { 'agent:siro': env.DOORBELL_CAPABILITY_SIRO },
   );
+  const doorbellCapabilityOwners = resolveDoorbellCapabilityOwners(
+    env.DOORBELL_CAPABILITY,
+    env.DOORBELL_CAPABILITIES_JSON,
+    { 'agent:siro': env.DOORBELL_CAPABILITY_SIRO },
+  );
   const exchangeCapabilities = resolveExchangeCapabilities(
     env.EXCHANGE_CAPABILITIES_JSON,
   );
@@ -862,6 +953,9 @@ export function createAppFromEnv(env: EnvBindings): Hono {
     ...base,
     signingSecret: env.SLACK_SIGNING_SECRET,
     ...(doorbellCapabilities.size === 0 ? {} : { doorbellCapabilities }),
+    ...(doorbellCapabilityOwners.size === 0
+      ? {}
+      : { doorbellCapabilityOwners }),
     ...(exchangeCapabilities.size === 0 ? {} : { exchangeCapabilities }),
     ...(env.EXCHANGE_BUCKET === undefined
       ? {}
