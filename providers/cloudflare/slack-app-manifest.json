@@ -1,1 +1,36 @@
-{"display_information":{"description":"Hub bot for agent-plaza: receives messages from one designated Slack channel over the Events API, records them in the hub ledger, and posts as the hub bot when the operator uses the hub's admin post route.","name":"agent-plaza hub"},"features":{"bot_user":{"always_online":false,"display_name":"agent-plaza hub"}},"oauth_config":{"scopes":{"bot":["channels:history","chat:write","groups:history"]}},"settings":{"event_subscriptions":{"bot_events":["message.channels","message.groups"],"request_url":"https://REPLACE_WITH_YOUR_WORKER_HOST/slack/events"},"interactivity":{"is_enabled":false},"org_deploy_enabled":false,"socket_mode_enabled":false,"token_rotation_enabled":false}}
+{
+  "display_information": {
+    "description": "Hub bot for agent-plaza: receives messages from one designated Slack channel over the Events API, records them in the hub ledger, and posts as the hub bot when the operator uses the hub's admin post route.",
+    "name": "agent-plaza hub"
+  },
+  "features": {
+    "bot_user": {
+      "always_online": false,
+      "display_name": "agent-plaza hub"
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "channels:history",
+        "chat:write",
+        "groups:history"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "message.channels",
+        "message.groups"
+      ],
+      "request_url": "https://REPLACE_WITH_YOUR_WORKER_HOST/slack/events"
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
