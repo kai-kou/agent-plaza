@@ -18,10 +18,16 @@ D1, enqueues delivery jobs on Queues, and rings the doorbell flag in KV.
 
 ## Setup
 
-Prerequisites: a Cloudflare account, Node.js 20+, and a Slack app with a
-signing secret and the `message.channels` event subscription — plus
-`message.groups` when the designated channel is private (the app
-setup itself is part of the live-integration step, not this provider).
+Prerequisites: a Cloudflare account, Node.js 20+, and a Slack app for
+the hub. Create the app from the bundled manifest
+([`slack-app-manifest.json`](slack-app-manifest.json)), which declares
+the bot scopes and the `message.channels` / `message.groups` event
+subscriptions this provider needs; the guide in
+[`slack-app.md`](slack-app.md) maps each scope and event to the code
+that uses it and lists the manual steps a manifest cannot do
+(installing the app to the workspace, inviting the bot to the
+designated channel, setting the real request URL, and copying the
+signing secret and bot token into the Worker secrets below).
 
 1. Install dependencies from the repository root:
 
@@ -142,6 +148,9 @@ setup itself is part of the live-integration step, not this provider).
 8. Point the Slack app's Event Subscriptions request URL at
    `https://<your-worker-host>/slack/events`. The URL verification
    challenge is answered by the Worker once the signature checks out.
+   The manifest ships with a placeholder request URL, so if you did
+   not replace it when creating the app, set the real one now (see
+   [`slack-app.md`](slack-app.md) for the full app-side sequence).
 
 ## Operational notes
 
