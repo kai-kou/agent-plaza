@@ -1,6 +1,7 @@
 export * from './d1-ledger-store.js';
 export * from './denied-log.js';
 export * from './kv-doorbell.js';
+export * from './doorbell-routing.js';
 export * from './r2-exchange.js';
 export * from './slack-signature.js';
 export * from './queue.js';

@@ -9,8 +9,10 @@
  *
  * Processing order per event, mirroring the local hub's lessons:
  * addressing -> ledger acceptance -> persist -> enqueue delivery ->
- * mark queued + persist -> ring the doorbell (the thread flag and the
- * channel's latest-event pointer). A Slack retry (same
+ * mark queued + persist -> ring the doorbell (the thread flag, the
+ * channel's latest-event pointer, and — participant doorbell, D-22 —
+ * the per-participant latest pointers the addressing result routes
+ * the post to; see doorbell-routing.ts). A Slack retry (same
  * event_id) resolves through the ledger's idempotency: the original
  * entry is returned, and if its delivery was never enqueued (state still
  * durably_accepted) the enqueue is completed then — the retry heals the
@@ -65,8 +67,13 @@ import {
 } from '@agent-plaza/core';
 import {
   channelLatestThreadId,
+  participantLatestThreadId,
   type KvDoorbell,
 } from './kv-doorbell.js';
+import {
+  hasCompleteMarker,
+  routeDoorbellRecipients,
+} from './doorbell-routing.js';
 import type {
   DeniedLogRecord,
   DeniedLogStore,
@@ -429,6 +436,31 @@ async function processMessage(
   // Move the channel's latest-event pointer too, so Tier-C readers
   // polling one key per channel also notice brand-new threads.
   await deps.doorbell.ring(channelLatestThreadId(ctx.channel), ctx.eventId);
+  // Participant doorbell (D-22, FR-6): also ring the per-participant
+  // latest pointers the addressing result routes this post to, so a
+  // reader polling only its own pointer wakes for posts addressed to
+  // it (plus the fail-open broadcasts) and sleeps through the rest.
+  // The thread flag and the shared pointer above always ring as well
+  // (the migration dual ring): readers that have not yet moved to
+  // their own pointer observe exactly what they observed before, and
+  // the routing can only add targeted wakes, never remove an existing
+  // one. The payload is the same {eventId, ts} on every key.
+  const routing = routeDoorbellRecipients({
+    recipients: decision.recipients,
+    senderId,
+    participants: deps.participants,
+    hasMarker: hasCompleteMarker(ctx.text),
+    isThreadReply: ctx.slackThreadTs !== ctx.ts,
+    threadParticipantIds: ledger
+      .entries()
+      .flatMap((e) => [e.envelope.senderId, ...e.envelope.recipientIds]),
+  });
+  for (const participantId of routing.participantIds) {
+    await deps.doorbell.ring(
+      participantLatestThreadId(ctx.channel, participantId),
+      ctx.eventId,
+    );
+  }
 
   return { kind: accept.duplicate ? 'duplicate' : 'accepted', entry: advanced.entry };
 }

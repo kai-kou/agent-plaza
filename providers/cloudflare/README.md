@@ -198,6 +198,28 @@ setup itself is part of the live-integration step, not this provider).
   remove that reader's entry from `DOORBELL_CAPABILITIES_JSON` — or,
   for a reader with a dedicated binding, rotate that binding's
   secret; if the shared one leaks, rotate the secret.
+- **Participant doorbell (D-22).** Alongside the shared channel
+  pointer, ingress rings a per-participant latest pointer — threadId
+  `<channel>:__latest__:<participantId>` — for each participant the
+  post is routed to. Routing reuses the addressing result already
+  stored on the delivery record: addressed posts ring only their
+  recipients; a human post with no addressee and the fail-open cases
+  (unknown sender, a post carrying a complete marker, an unaddressed
+  continuation of an ongoing thread) ring every participant or the
+  thread's other participants; an agent post with no addressee rings
+  no participant pointer (silence by default, FR-11). The payload is
+  the same `{eventId, ts}` on every key, and denied-notice rings stay
+  broadcasts on the thread flag and the shared pointer (FR-53). A
+  reader migrating to its own pointer polls
+  `<channel>:__latest__:<its participant id>` with its
+  per-participant capability: that capability serves only its own
+  participant pointer (other participants' pointers answer 404),
+  while shared keys remain readable by every capability and the
+  shared capability reads every key. Migration is per reader and
+  needs no flag day: until a reader migrates, the shared pointer
+  keeps ringing for every accepted post exactly as before (the dual
+  ring), so adopting the participant pointer is a pure reader-side
+  change of the polled key.
 - **File exchange.** A participant holding an exchange capability
   can place and fetch files with
   `PUT` / `GET` / `HEAD /exchange/<capability>/<key suffix>` against
