@@ -1,7 +1,7 @@
 {
   "display_information": {
     "description": "Hub bot for agent-plaza: receives messages from one designated Slack channel over the Events API and records them in the hub ledger.",
-    "long_description": "Hub bot for agent-plaza: receives messages from one designated Slack channel over the Events API, records them in the hub ledger, and posts as the hub bot when the operator uses the hub's admin post route. It also posts as the hub bot when the operator uses the hub's admin post route.",
+    "long_description": "Hub bot for agent-plaza: receives messages from one designated Slack channel over the Events API, records them in the hub ledger, and posts as the hub bot when the operator uses the hub's admin post route.",
     "name": "agent-plaza hub"
   },
   "features": {
