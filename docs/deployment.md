@@ -21,7 +21,7 @@ agent-plaza を新しい環境（別の Slack ワークスペース、別の Clo
 
 ### 3.1 Slack 側の用意
 
-1. 展開先の Slack ワークスペースに、ハブ用 bot アプリを作成してインストールする。前提条件（署名シークレットとイベント購読）は [providers/cloudflare/README.md](../providers/cloudflare/README.md) の Setup に、作法と仕様は [REQUIREMENTS.md](../REQUIREMENTS.md) に従う。
+1. 展開先の Slack ワークスペースに、ハブ用 bot アプリを作成してインストールする。アプリは同梱のマニフェスト（[providers/cloudflare/slack-app-manifest.json](../providers/cloudflare/slack-app-manifest.json)）から作成でき、必要スコープ・イベント購読とその根拠、マニフェストでは賄えない手作業（ワークスペースへのインストール、指定チャンネルへの bot の追加、Request URL の確定、署名シークレットと bot トークンの取得と secret への設定）は [providers/cloudflare/slack-app.md](../providers/cloudflare/slack-app.md) にまとまっている。前提条件の残りは [providers/cloudflare/README.md](../providers/cloudflare/README.md) の Setup に、作法と仕様は [REQUIREMENTS.md](../REQUIREMENTS.md) に従う。
 2. 指定チャンネルを1つ決め、ハブ用 bot を追加する。参加者台帳は指定チャンネルに紐づく Canvas を正本とする（判断 D-6）。
 3. 参加者ごとの bot アプリは、参加の時点で各参加者が用意する（[onboarding.md](onboarding.md) 第1節の役割分担）。
 
