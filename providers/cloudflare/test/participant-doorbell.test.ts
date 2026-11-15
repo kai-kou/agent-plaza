@@ -95,7 +95,7 @@ function messageBody(input: {
 
 const pointer = (participantId: string) => `C1:__latest__:${participantId}`;
 
-describe('ingress participant doorbell routing (D-22)', () => {
+describe('ingress participant doorbell routing (D-22 / D-23)', () => {
   it('rings only the addressed participant pointer, plus the shared keys', async () => {
     const { deps } = makeDeps();
     const r = await handleSlackEvent(
@@ -116,7 +116,7 @@ describe('ingress participant doorbell routing (D-22)', () => {
     expect(since.events.map((e) => e.eventId)).toEqual(['Ev1']);
   });
 
-  it('rings every participant pointer for a human post with no addressee', async () => {
+  it('rings every participant pointer for an owner (human) post with no addressee', async () => {
     const { deps } = makeDeps();
     const r = await handleSlackEvent(
       deps,
@@ -144,7 +144,7 @@ describe('ingress participant doorbell routing (D-22)', () => {
     ).toBe('Ev1');
   });
 
-  it('fails open for an agent post carrying a complete marker', async () => {
+  it('rings only the marker addressee for an agent post carrying a complete marker', async () => {
     const { deps } = makeDeps();
     const r = await handleSlackEvent(
       deps,
@@ -155,12 +155,38 @@ describe('ingress participant doorbell routing (D-22)', () => {
       }),
     );
     expect(r.kind).toBe('accepted');
+    expect((await deps.doorbell.peek(pointer('slack:U300')))?.eventId).toBe('Ev1');
+    expect(await deps.doorbell.peek(pointer('slack:U100'))).toBeNull();
+    expect(await deps.doorbell.peek(pointer('slack:U200'))).toBeNull();
+    // The shared ring is unaffected by the routing.
+    expect((await deps.doorbell.peek('C1:__latest__'))?.eventId).toBe('Ev1');
+  });
+
+  it('rings every participant pointer for an agent post with a here broadcast address', async () => {
+    const { deps } = makeDeps();
+    const r = await handleSlackEvent(
+      deps,
+      messageBody({ eventId: 'Ev1', user: 'U200', text: '<!here> 全員へ連絡です' }),
+    );
+    expect(r.kind).toBe('accepted');
     for (const id of ['slack:U100', 'slack:U200', 'slack:U300']) {
       expect((await deps.doorbell.peek(pointer(id)))?.eventId).toBe('Ev1');
     }
   });
 
-  it('fails open to the other thread participants for an unaddressed thread reply', async () => {
+  it('rings every participant pointer for a channel broadcast address', async () => {
+    const { deps } = makeDeps();
+    const r = await handleSlackEvent(
+      deps,
+      messageBody({ eventId: 'Ev1', user: 'U300', text: '<!channel> お知らせです' }),
+    );
+    expect(r.kind).toBe('accepted');
+    for (const id of ['slack:U100', 'slack:U200', 'slack:U300']) {
+      expect((await deps.doorbell.peek(pointer(id)))?.eventId).toBe('Ev1');
+    }
+  });
+
+  it('keeps the thread continuation nomination as addressing, and rings nobody for an unaddressed reply in one\'s own thread', async () => {
     const { deps } = makeDeps();
     const ROOT = '1793100000.000100';
     // Root: an agent post with no addressee (silence on pointers).
@@ -188,8 +214,10 @@ describe('ingress participant doorbell routing (D-22)', () => {
       ).kind,
     ).toBe('accepted');
     expect((await deps.doorbell.peek(pointer('slack:U200')))?.eventId).toBe('EvB');
-    // Alpha replies with no addressee: the thread continuation
-    // fail-open rings Beta, the other participant in the thread.
+    // Alpha replies with no addressee in its own thread: the
+    // nomination names the root author — Alpha themself — so the
+    // reply is address-less and rings nobody (D-23 removed the
+    // thread-participants fail-open).
     expect(
       (
         await handleSlackEvent(
@@ -204,8 +232,27 @@ describe('ingress participant doorbell routing (D-22)', () => {
         )
       ).kind,
     ).toBe('accepted');
-    expect((await deps.doorbell.peek(pointer('slack:U300')))?.eventId).toBe('EvC');
+    expect(await deps.doorbell.peek(pointer('slack:U300'))).toBeNull();
     expect((await deps.doorbell.peek(pointer('slack:U200')))?.eventId).toBe('EvB');
+    // Beta replies with no addressee in Alpha's thread: the thread
+    // continuation nomination (FR-10, priority 2) names the root
+    // author, so Alpha's pointer rings — the nomination still counts
+    // as addressing under D-23.
+    expect(
+      (
+        await handleSlackEvent(
+          deps,
+          messageBody({
+            eventId: 'EvD',
+            user: 'U300',
+            text: '進捗を共有します',
+            ts: '1793100000.000400',
+            threadTs: ROOT,
+          }),
+        )
+      ).kind,
+    ).toBe('accepted');
+    expect((await deps.doorbell.peek(pointer('slack:U200')))?.eventId).toBe('EvD');
   });
 
   describe('denied-notice stays a broadcast (FR-53 (2))', () => {

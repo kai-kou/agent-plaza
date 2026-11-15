@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import type { Participant } from '@agent-plaza/core';
 import {
+  hasBroadcastAddress,
   hasCompleteMarker,
+  parseCompleteMarkerAddressees,
   participantIdFromLatestPointer,
   participantLatestThreadId,
   routeDoorbellRecipients,
@@ -20,16 +22,15 @@ function input(
 ): DoorbellRoutingInput {
   return {
     recipients: [],
+    markerRecipients: [],
+    broadcastAddress: false,
     senderId: 'slack:U100',
     participants,
-    hasMarker: false,
-    isThreadReply: false,
-    threadParticipantIds: [],
     ...overrides,
   };
 }
 
-describe('routeDoorbellRecipients (D-22)', () => {
+describe('routeDoorbellRecipients (D-22 / D-23)', () => {
   it('rings only the addressed participants when recipients are decided', () => {
     const r = routeDoorbellRecipients(input({ recipients: ['slack:U200'] }));
     expect(r.basis).toBe('recipients');
@@ -55,9 +56,45 @@ describe('routeDoorbellRecipients (D-22)', () => {
     expect(r.participantIds).toEqual([]);
   });
 
-  it('broadcasts to all participants when a human sender has no recipients', () => {
-    const r = routeDoorbellRecipients(input({ recipients: [] }));
-    expect(r.basis).toBe('human-broadcast');
+  it('rings only the marker addressee when the marker to= decides', () => {
+    const r = routeDoorbellRecipients(
+      input({ senderId: 'slack:U200', markerRecipients: ['slack:U300'] }),
+    );
+    expect(r.basis).toBe('marker-recipients');
+    expect(r.participantIds).toEqual(['slack:U300']);
+  });
+
+  it('unions marker addressees with the FR-10 recipients', () => {
+    const r = routeDoorbellRecipients(
+      input({
+        senderId: 'slack:U200',
+        recipients: ['slack:U100'],
+        markerRecipients: ['slack:U300'],
+      }),
+    );
+    expect(r.basis).toBe('marker-recipients');
+    expect(r.participantIds).toEqual(['slack:U100', 'slack:U300']);
+  });
+
+  it('does not fail open on a marker whose addressees are all unusable', () => {
+    // The sender themself, and an unregistered id: nothing usable
+    // remains, so an agent post falls through to silence (D-23
+    // replaced the marker-presence fail-open).
+    const r = routeDoorbellRecipients(
+      input({
+        senderId: 'slack:U200',
+        markerRecipients: ['slack:U200', 'agent:nobody'],
+      }),
+    );
+    expect(r.basis).toBe('agent-silence');
+    expect(r.participantIds).toEqual([]);
+  });
+
+  it('broadcasts to all participants for an explicit broadcast address', () => {
+    const r = routeDoorbellRecipients(
+      input({ senderId: 'slack:U200', broadcastAddress: true }),
+    );
+    expect(r.basis).toBe('broadcast');
     expect(r.participantIds).toEqual([
       'slack:U100',
       'slack:U200',
@@ -65,7 +102,25 @@ describe('routeDoorbellRecipients (D-22)', () => {
     ]);
   });
 
-  it('rings no participant pointer when an agent sender has no recipients (FR-11)', () => {
+  it('lets the explicit broadcast win over decided recipients', () => {
+    const r = routeDoorbellRecipients(
+      input({ recipients: ['slack:U200'], broadcastAddress: true }),
+    );
+    expect(r.basis).toBe('broadcast');
+    expect(r.participantIds).toHaveLength(3);
+  });
+
+  it('broadcasts to all participants when the owner (human) has no addressees', () => {
+    const r = routeDoorbellRecipients(input({ recipients: [] }));
+    expect(r.basis).toBe('owner-broadcast');
+    expect(r.participantIds).toEqual([
+      'slack:U100',
+      'slack:U200',
+      'slack:U300',
+    ]);
+  });
+
+  it('rings no participant pointer when an agent sender has no addressees (FR-11)', () => {
     const r = routeDoorbellRecipients(
       input({ senderId: 'slack:U200', recipients: [] }),
     );
@@ -83,79 +138,6 @@ describe('routeDoorbellRecipients (D-22)', () => {
       'slack:U200',
       'slack:U300',
     ]);
-  });
-
-  it('fails open to all participants when a complete marker is present', () => {
-    // The marker's to= is not parsed at ingress (FR-53 (3)), so an
-    // agent post carrying one must not be silenced by empty recipients.
-    const r = routeDoorbellRecipients(
-      input({ senderId: 'slack:U200', recipients: [], hasMarker: true }),
-    );
-    expect(r.basis).toBe('fail-open-marker');
-    expect(r.participantIds).toEqual([
-      'slack:U100',
-      'slack:U200',
-      'slack:U300',
-    ]);
-  });
-
-  it('lets the marker fail-open win over decided recipients', () => {
-    const r = routeDoorbellRecipients(
-      input({ recipients: ['slack:U200'], hasMarker: true }),
-    );
-    expect(r.basis).toBe('fail-open-marker');
-    expect(r.participantIds).toHaveLength(3);
-  });
-
-  it('fails open to the other thread participants for a thread continuation', () => {
-    const r = routeDoorbellRecipients(
-      input({
-        senderId: 'slack:U200',
-        recipients: [],
-        isThreadReply: true,
-        threadParticipantIds: ['slack:U200', 'slack:U300'],
-      }),
-    );
-    expect(r.basis).toBe('fail-open-thread');
-    expect(r.participantIds).toEqual(['slack:U300']);
-  });
-
-  it('falls through to silence when a thread reply has no other participants', () => {
-    const r = routeDoorbellRecipients(
-      input({
-        senderId: 'slack:U200',
-        recipients: [],
-        isThreadReply: true,
-        threadParticipantIds: ['slack:U200'],
-      }),
-    );
-    expect(r.basis).toBe('agent-silence');
-    expect(r.participantIds).toEqual([]);
-  });
-
-  it('ignores thread participants for a top-level post', () => {
-    const r = routeDoorbellRecipients(
-      input({
-        senderId: 'slack:U200',
-        recipients: [],
-        isThreadReply: false,
-        threadParticipantIds: ['slack:U300'],
-      }),
-    );
-    expect(r.basis).toBe('agent-silence');
-  });
-
-  it('decided recipients win over the thread fail-open', () => {
-    const r = routeDoorbellRecipients(
-      input({
-        senderId: 'slack:U200',
-        recipients: ['slack:U100'],
-        isThreadReply: true,
-        threadParticipantIds: ['slack:U300'],
-      }),
-    );
-    expect(r.basis).toBe('recipients');
-    expect(r.participantIds).toEqual(['slack:U100']);
   });
 });
 
@@ -175,6 +157,69 @@ describe('hasCompleteMarker', () => {
   it('is false for ordinary text', () => {
     expect(hasCompleteMarker('ただの投稿です')).toBe(false);
     expect(hasCompleteMarker('AH1 について話す')).toBe(false);
+  });
+});
+
+describe('parseCompleteMarkerAddressees', () => {
+  it('extracts the to= addressee of the primary marker', () => {
+    expect(
+      parseCompleteMarkerAddressees(
+        '本文\n⟦AH1⟧ from=agent:alpha type=REPORT to=agent:beta cid=x',
+      ),
+    ).toEqual(['agent:beta']);
+  });
+
+  it('extracts the to= addressee of the ASCII alias marker', () => {
+    expect(
+      parseCompleteMarkerAddressees(
+        '[AGENT-HUB/0.1] from=agent:alpha type=REQUEST to=agent:beta',
+      ),
+    ).toEqual(['agent:beta']);
+  });
+
+  it('splits a comma-separated to= into every addressee', () => {
+    expect(
+      parseCompleteMarkerAddressees(
+        '⟦AH1⟧ from=agent:alpha type=REQUEST to=agent:beta,agent:gamma cid=x',
+      ),
+    ).toEqual(['agent:beta', 'agent:gamma']);
+  });
+
+  it('collects repeated to= fields and removes duplicates', () => {
+    expect(
+      parseCompleteMarkerAddressees(
+        '⟦AH1⟧ from=agent:alpha type=REQUEST to=agent:beta to=agent:beta cid=x',
+      ),
+    ).toEqual(['agent:beta']);
+  });
+
+  it('returns nothing for a marker without to=', () => {
+    expect(
+      parseCompleteMarkerAddressees(
+        '⟦AH1⟧ from=agent:alpha type=REPORT cid=x',
+      ),
+    ).toEqual([]);
+  });
+
+  it('never mines body prose for to= without a marker', () => {
+    expect(
+      parseCompleteMarkerAddressees('宛先は to=agent:beta と書きます'),
+    ).toEqual([]);
+  });
+});
+
+describe('hasBroadcastAddress', () => {
+  it('detects here, channel and everyone, with or without a label', () => {
+    expect(hasBroadcastAddress('<!here> 連絡です')).toBe(true);
+    expect(hasBroadcastAddress('<!channel> 連絡です')).toBe(true);
+    expect(hasBroadcastAddress('<!everyone> 連絡です')).toBe(true);
+    expect(hasBroadcastAddress('<!here|@here> 連絡です')).toBe(true);
+  });
+
+  it('is false for mentions and ordinary text', () => {
+    expect(hasBroadcastAddress('<@U200> 調べてほしい')).toBe(false);
+    expect(hasBroadcastAddress('ただの投稿です')).toBe(false);
+    expect(hasBroadcastAddress('<!date^1793100000^本日> の話')).toBe(false);
   });
 });
 
