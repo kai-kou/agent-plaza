@@ -71,7 +71,8 @@ import {
   type KvDoorbell,
 } from './kv-doorbell.js';
 import {
-  hasCompleteMarker,
+  hasBroadcastAddress,
+  parseCompleteMarkerAddressees,
   routeDoorbellRecipients,
 } from './doorbell-routing.js';
 import type {
@@ -181,6 +182,26 @@ async function sha256Hex(text: string): Promise<string> {
 
 export function slackParticipantId(slackUserId: string): string {
   return `slack:${slackUserId}`;
+}
+
+/**
+ * Resolve one complete-marker `to=` token to a participant id.
+ * Marker addressees are written as stable participant ids
+ * (`agent:alpha`), which resolveParticipantId maps directly; a bare
+ * Slack user id is also accepted and normalized the way mention ids
+ * are. A token that resolves to nobody is returned as written — the
+ * doorbell routing filter drops unregistered ids.
+ */
+function resolveMarkerAddressee(
+  token: string,
+  participants: Participant[],
+): string {
+  const direct = resolveParticipantId(token, participants);
+  if (participants.some((p) => p.id === direct)) return direct;
+  if (/^[A-Z0-9]+$/.test(token)) {
+    return resolveParticipantId(slackParticipantId(token), participants);
+  }
+  return direct;
 }
 
 export async function handleSlackEvent(
@@ -343,15 +364,17 @@ async function processMessage(
   }
 
   // Addressing inputs this ingress can supply today: Slack mentions and
-  // thread continuation. Role and broadcast addressing are not parsed
-  // here — structured marker parsing (M4) owns them; until then they are
-  // unreachable from ingress rather than guessed from the body.
+  // thread continuation. Role addressing is not parsed here and stays
+  // unreachable from ingress rather than guessed from the body. The
+  // complete marker's `to=` is parsed further below, but it feeds the
+  // doorbell routing (D-23), not this decision: the delivery record's
+  // recipients remain the FR-10 result.
   //
   // FR-14 strict addressing for bot-origin posts: only the mention
   // level is evaluated, so the input is reduced to mentions alone (an
   // empty bodyText cannot name-match, no nomination, no role, no
-  // broadcast). Structured in-message addressing, once parsed by the M4
-  // marker work, will feed the same mention level.
+  // broadcast). The marker `to=` still reaches bot-origin posts, one
+  // step later, through the doorbell routing.
   const decision = ctx.botOrigin
     ? decideAddressing(
         {
@@ -436,24 +459,27 @@ async function processMessage(
   // Move the channel's latest-event pointer too, so Tier-C readers
   // polling one key per channel also notice brand-new threads.
   await deps.doorbell.ring(channelLatestThreadId(ctx.channel), ctx.eventId);
-  // Participant doorbell (D-22, FR-6): also ring the per-participant
-  // latest pointers the addressing result routes this post to, so a
-  // reader polling only its own pointer wakes for posts addressed to
-  // it (plus the fail-open broadcasts) and sleeps through the rest.
-  // The thread flag and the shared pointer above always ring as well
-  // (the migration dual ring): readers that have not yet moved to
-  // their own pointer observe exactly what they observed before, and
-  // the routing can only add targeted wakes, never remove an existing
-  // one. The payload is the same {eventId, ts} on every key.
+  // Participant doorbell (D-22 / D-23, FR-6): also ring the
+  // per-participant latest pointers the routing selects for this
+  // post, so a reader polling only its own pointer wakes for posts
+  // addressed to it and sleeps through the rest. The routing inputs
+  // are the FR-10 recipients, the complete marker's `to=` addressees
+  // parsed here (the M4 marker work: the marker no longer fails open
+  // on its presence alone), and Slack's explicit broadcast address
+  // (<!here> / <!channel>). Address-less posts ring no participant
+  // pointer, except the two fail-opens D-23 keeps (the owner and
+  // unknown senders). The thread flag and the shared pointer above
+  // always ring as well (the migration dual ring), so readers that
+  // have not yet moved to their own pointer keep working unchanged.
+  // The payload is the same {eventId, ts} on every key.
   const routing = routeDoorbellRecipients({
     recipients: decision.recipients,
+    markerRecipients: parseCompleteMarkerAddressees(ctx.text).map(
+      (token) => resolveMarkerAddressee(token, deps.participants),
+    ),
+    broadcastAddress: hasBroadcastAddress(ctx.text),
     senderId,
     participants: deps.participants,
-    hasMarker: hasCompleteMarker(ctx.text),
-    isThreadReply: ctx.slackThreadTs !== ctx.ts,
-    threadParticipantIds: ledger
-      .entries()
-      .flatMap((e) => [e.envelope.senderId, ...e.envelope.recipientIds]),
   });
   for (const participantId of routing.participantIds) {
     await deps.doorbell.ring(
