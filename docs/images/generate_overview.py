@@ -112,6 +112,7 @@ L = {
         verify=("署名検証", "Slack イベントを受付"),
         ledger=("台帳 Ledger", "受付・採番・冪等化\n（D1 / Durable Objects）"),
         doorbell=("ドアベル", "本文を運ばない合図だけ\n{ event_id, ts }（KV）"),
+        doorbell_target="宛先だけ鳴る",
         queue=("配送キュー", "配送と再試行（Queues）"),
         flow=("投稿 → 検証 → 台帳に記録 → ドアベルが鳴る → 各自の認証経路で本文を取得 → スレッドで返信",),
         proto="プロトコル",
@@ -130,7 +131,7 @@ L = {
         principles="設計原則",
         principle_items=[
             "正本は Slack: 履歴が唯一の会話記録",
-            "ドアベルは本文を運ばない: 漏れても会話は漏れない",
+            "ドアベルは本文を運ばず、宛先の参加者だけに鳴る: 漏れても会話は漏れない",
             "紛失しても台帳から回復できる: ドアベルは遅延の最適化",
             "共通インフラ仕様＋プロバイダ別実装（参照実装は Cloudflare）",
         ],
@@ -151,6 +152,7 @@ L = {
         verify=("Signature check", "Receives Slack events"),
         ledger=("Ledger", "Accept, sequence, dedupe\n(D1 / Durable Objects)"),
         doorbell=("Doorbell", "A signal only, no body\n{ event_id, ts } (KV)"),
+        doorbell_target="Addressee only",
         queue=("Delivery queue", "Delivery and retries (Queues)"),
         flow=("Post → verify → record in the ledger → doorbell rings → each agent fetches via its own authenticated path → replies in thread",),
         proto="Protocol",
@@ -169,7 +171,7 @@ L = {
         principles="Design principles",
         principle_items=[
             "Slack is canonical: the history is the single record of the conversation",
-            "The doorbell carries no body: a leaked signal leaks no conversation",
+            "The doorbell carries no body and rings only for the addressee: a leaked signal leaks no conversation",
             "A lost doorbell is recoverable from the ledger: it optimizes latency, not correctness",
             "A common infrastructure spec with per-provider implementations (Cloudflare first)",
         ],
@@ -231,11 +233,19 @@ def render(lang: str, out: str):
     ]
     iy = 440
     positions = [(hx + 36, iy), (hx + 492, iy), (hx + 36, iy + 268), (hx + 492, iy + 268)]
-    for (name, note, color), (bx, by) in zip(inner, positions):
+    for idx, ((name, note, color), (bx, by)) in enumerate(zip(inner, positions)):
         box(d, [bx, by, bx + 432, by + 238], fill=(17, 27, 46), edge=color, width=3)
         d.rectangle([bx, by, bx + 432, by + 12], fill=color)
         text(d, (bx + 26, by + 34), name, 38, fill=TITLE, bold=True)
         text(d, (bx + 26, by + 100), note, 29, fill=BODY)
+        if idx == 2:
+            # Per-participant doorbell (D-22): only the addressed participant's dot is lit.
+            for j, dcx in enumerate((bx + 42, bx + 92, bx + 142)):
+                if j == 1:
+                    d.ellipse([dcx - 14, by + 182, dcx + 14, by + 210], fill=ORANGE)
+                else:
+                    d.ellipse([dcx - 14, by + 182, dcx + 14, by + 210], outline=SMALL, width=3)
+            text(d, (bx + 172, by + 180), t["doorbell_target"], 25, fill=BODY, bold=True)
     # flow line under hub
     text(d, (90, 1085), "Flow", 36, fill=TEAL, bold=True)
     text(d, (230, 1089), t["flow"][0], 33, fill=BODY)
