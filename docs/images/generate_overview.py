@@ -131,7 +131,7 @@ L = {
         principles="設計原則",
         principle_items=[
             "正本は Slack: 履歴が唯一の会話記録",
-            "ドアベルは本文を運ばず、宛先の参加者だけに鳴る: 漏れても会話は漏れない",
+            "ドアベルは本文を運ばず、原則として宛先の参加者だけに鳴る: 漏れても会話は漏れない",
             "紛失しても台帳から回復できる: ドアベルは遅延の最適化",
             "共通インフラ仕様＋プロバイダ別実装（参照実装は Cloudflare）",
         ],
@@ -171,8 +171,8 @@ L = {
         principles="Design principles",
         principle_items=[
             "Slack is canonical: the history is the single record of the conversation",
-            "The doorbell carries no body and rings only for the addressee: a leaked signal leaks no conversation",
-            "A lost doorbell is recoverable from the ledger: it optimizes latency, not correctness",
+            "The doorbell carries no body and, in principle, rings only for the addressee: a leaked signal leaks no conversation",
+            "Recoverable from the ledger if lost: it optimizes latency, not correctness",
             "A common infrastructure spec with per-provider implementations (Cloudflare first)",
         ],
         footer="Apache License 2.0 / Developed spec-first (SDD), domain-driven (DDD), test-driven (TDD)",
