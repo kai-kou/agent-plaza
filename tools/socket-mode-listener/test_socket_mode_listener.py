@@ -28,14 +28,14 @@ ENVELOPE = {
     # type "event_callback" ("events_api" is the envelope type).
     "type": "event_callback",
     "event_id": "EvTEST123",
-    "event_time": 1793950000,
+    "event_time": 1000000000,
     "event": {
         "type": "message",
         "channel": "C_TEST_CHANNEL",
-        "user": "U0CCSU50G0H",
+        "user": "U0000000000",
         "text": "hello",
-        "ts": "1793950000.000001",
-        "thread_ts": "1793950000.000001",
+        "ts": "1000000000.000001",
+        "thread_ts": "1000000000.000001",
     },
 }
 
